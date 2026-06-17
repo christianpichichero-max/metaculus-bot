@@ -1,0 +1,10 @@
+# Metaculus forecasting bot — pinned to the same set the official template uses,
+# but managed with pip + venv (matching the polymarket-bot workflow) instead of Poetry.
+# forecasting-tools pulls in its own tree (litellm, openai, anthropic, pydantic, ...).
+forecasting-tools>=0.2.90
+openai>=2.0.0
+asknews>=0.13.11
+numpy>=2.3.0
+requests>=2.32.3
+python-dotenv>=1.0.1
+python-decouple>=3.8
