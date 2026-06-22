@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -674,20 +675,48 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["tournament", "metaculus_cup", "test_questions"],
+        choices=["tournament", "minibench", "metaculus_cup", "test_questions"],
         default="tournament",
-        help="What to forecast on (default: tournament)",
+        help="What to forecast on (default: tournament). 'minibench' = the bi-weekly MiniBench only (cheap, fast feedback).",
     )
     args = parser.parse_args()
-    run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
+    run_mode: Literal["tournament", "minibench", "metaculus_cup", "test_questions"] = args.mode
 
     check_environment(strict=True)
     publish_to_metaculus = True
     print_startup_banner(run_mode, will_publish=publish_to_metaculus)
 
-    # Configure the bot. The `llms=` block below is commented out to use
-    # whichever default models forecasting-tools picks based on your env vars;
-    # uncomment and edit to pin specific models.
+    # Model selection — robust against the SDK's broken default researcher.
+    #
+    # The forecasting-tools default `researcher` reaches for a *-search-preview
+    # model, and when no search provider is configured it falls back to the
+    # Metaculus proxy's "metaculus/gpt-4o-search-preview". That fails if the token
+    # has no proxy LLM allowance — which silently kills every forecast. So we pin
+    # the researcher explicitly per provider, and only when no real search backend
+    # exists. A dedicated search key (AskNews/Perplexity/Exa/OpenRouter/OpenAI)
+    # gives true live-web research; an Anthropic-only setup researches LLM-only.
+    def _select_llms():
+        has_search_backend = any(
+            os.getenv(k)
+            for k in (
+                "ASKNEWS_CLIENT_ID", "ASKNEWS_API_KEY", "PERPLEXITY_API_KEY",
+                "OPENROUTER_API_KEY", "EXA_API_KEY", "OPENAI_API_KEY",
+            )
+        )
+        # OpenRouter / OpenAI: the SDK's own defaults already pick valid,
+        # search-capable models — let it.
+        if os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY"):
+            return None
+        # Anthropic key present: default/summarizer/parser defaults are fine, but
+        # the researcher would wrongly hit the proxy. If a search backend exists,
+        # let the SDK use it; otherwise research with Claude (no live web).
+        if os.getenv("ANTHROPIC_API_KEY"):
+            if has_search_backend:
+                return None
+            return {"researcher": GeneralLlm(model="claude-3-7-sonnet-latest", temperature=0.1)}
+        # Metaculus-proxy-only fallback (works ONLY if the token has proxy credits).
+        return {"researcher": GeneralLlm(model="metaculus/gpt-4o", temperature=0.1)}
+
     bot = EdgeForecastBot(
         research_reports_per_question=1,
         predictions_per_research_report=5,
@@ -696,17 +725,7 @@ if __name__ == "__main__":
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
-        # llms={
-        #     "default": GeneralLlm(
-        #         model="openrouter/openai/gpt-4o",
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        #     "researcher": "asknews/news-summaries",
-        #     "parser": "openai/gpt-4o-mini",
-        # },
+        llms=_select_llms(),
     )
 
     # Per-mode tournament URL shown in the summary banner footer. These
@@ -714,6 +733,7 @@ if __name__ == "__main__":
     # whenever those rotate seasons.
     TOURNAMENT_URLS = {
         "tournament": "https://www.metaculus.com/tournament/summer-futureeval-2026/",
+        "minibench": "https://www.metaculus.com/aib/minibench/",
         "metaculus_cup": "https://www.metaculus.com/tournament/metaculus-cup-summer-2025/",
         "test_questions": "https://www.metaculus.com/tournament/bot-testing-area/",
     }
@@ -734,6 +754,14 @@ if __name__ == "__main__":
             )
         )
         forecast_reports = seasonal_tournament_reports + minibench_reports
+    elif run_mode == "minibench":
+        # MiniBench only — the bi-weekly ~$1k / ~60-question rounds. Cheapest lane
+        # and fastest scored feedback (every ~2 weeks vs a 4-month season).
+        forecast_reports = asyncio.run(
+            bot.forecast_on_tournament(
+                client.CURRENT_MINIBENCH_ID, return_exceptions=True
+            )
+        )
     elif run_mode == "metaculus_cup":
         # The Metaculus Cup may be uninitialized near the start of a season
         # (Jan/May/Sep). AXC_2025_TOURNAMENT_ID = 32564 and
