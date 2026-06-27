@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "7,27,47 * * * *" # every 20 min, offset off the hour. skip_previously_forecasted_questions=True handles dedupe.
 
+# Needs write access to push the accumulating forecast log to the 'data' branch.
+permissions:
+  contents: write
+
 # Prevent overlapping runs (a run can outlast the 20-min cadence).
 concurrency:
   group: ${{ github.workflow }}
@@ -36,8 +40,32 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
-      # Persist this run's forecast log so we can review calibration over time.
-      - name: Upload forecast log
+      # THE CALIBRATION FLYWHEEL: append this run's forecasts to the durable 'data'
+      # branch so the private track record accumulates across runs (the one real edge).
+      # A fresh checkout means data/forecasts.jsonl holds ONLY this run's new forecasts
+      # (skip_previously_forecasted dedupes), so a plain append never duplicates.
+      - name: Persist forecast log to 'data' branch
+        if: always()
+        run: |
+          set +e
+          if [ ! -s data/forecasts.jsonl ]; then echo "no new forecasts this run — nothing to persist"; exit 0; fi
+          REPO="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git config --global user.email "bot@users.noreply.github.com"
+          git config --global user.name "chrispbacon-bot"
+          D="$(mktemp -d)"
+          if git clone --quiet --depth 1 --branch data "$REPO" "$D" 2>/dev/null; then
+            cat data/forecasts.jsonl >> "$D/forecasts.jsonl"
+            ( cd "$D" && git add forecasts.jsonl && git commit --quiet -m "forecasts $(date -u +%FT%TZ)" && git push --quiet origin data ) \
+              && echo "appended to existing data branch"
+          else
+            cd "$D"
+            git init --quiet && git checkout --quiet -b data
+            cp "$GITHUB_WORKSPACE/data/forecasts.jsonl" forecasts.jsonl
+            git add forecasts.jsonl && git commit --quiet -m "init forecast log $(date -u +%FT%TZ)"
+            git push --quiet "$REPO" data && echo "created data branch"
+          fi
+      # Belt-and-suspenders: also keep the per-run artifact.
+      - name: Upload forecast log artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:

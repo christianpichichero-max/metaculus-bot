@@ -33,8 +33,31 @@ is the labor engine; <$1k, NY-eligible). See `~/research/income-opportunities/pa
   `CURRENT_METACULUS_CUP_ID`. Bump `forecasting-tools` each season so those stay current.
 - Power-law payout: the stock template finishes near the bottom. Default ≠ paid. Iterate.
 
+## The one real EDGE (per the competitive-edge research — see docs/competitive-edge-plan.md)
+We cannot win on raw model power (free o4-mini vs rivals' o3/GPT-5; "model >> scaffolding"). The
+only DEFENSIBLE edge for a free solo operator is the **calibration flywheel**: a private record of
+every forecast joined to its real resolution, used to gate every change. Code is copyable; the
+accumulated ground-truth + validated knob-settings are not, and they compound each season.
+- **Flywheel plumbing:** the tournament workflow appends each run's forecasts to the **`data` branch**
+  (NOT main; `data/*.jsonl` is gitignored locally). Pull it: `git fetch origin data && git show
+  origin/data:forecasts.jsonl > data/forecasts.jsonl`. `resolve.py` joins forecasts→resolutions and
+  reports Brier + a reliability table. `benchmark.py --ab` is the fast community-proxy A/B gate.
+- **HARD MERGE GATE:** no prompt/model/aggregation change ships unless it beats current on
+  `benchmark.py` over ≥100 questions across ≥2 runs (segment by binary/MC/numeric). Discipline IS the edge.
+- **Roadmap (next edges, all in docs/competitive-edge-plan.md):** (1) multi-FAMILY ensemble
+  (o4-mini + claude-sonnet-4-6 + another) governed by a private accuracy+divergence ledger — FIX the
+  concurrency bug (5 draws run concurrently; don't mutate shared `self._llms`); (2) quant-source-data
+  for MiniBench numeric (FRED/yfinance/Trends) = Christian's judgment mechanized; (3) calibration
+  diagnosis once ≥100 resolved; (4) reliability hardening (dead-man's-switch, redundant trigger).
+- **AVOID (crowded / NOT edges — don't over-invest):** prompt-wording wars, chasing premium models on
+  every draw, global recalibration/extremizing, coverage-as-edge, static-NO tilt, re-forecast-before-close
+  (dead for FutureEval), naive backtesting on resolved Qs (look-ahead leakage). The whole search+model+
+  ensemble+base-rate+geo-odds stack is table stakes, not differentiation.
+
 ## Status
-- v0.1 scaffolded 2026-06-17: template forked, Poetry→pip, brain re-tuned, forecast logging wired,
-  3 workflows converted, local imports/construction verified.
-- NEXT (gated on Christian's keys): smoke-test `--mode test_questions` end-to-end, then push to
-  GitHub + add Actions secrets + enable the 20-min tournament workflow.
+- v0.1 scaffolded 2026-06-17; v0.2 optimized 2026-06-22 (geo-odds, base-rate research, benchmark harness).
+- **LIVE & FREE 2026-06-27:** $300 OpenRouter grant from Ben; config = o4-mini forecaster (temp 1) +
+  gpt-4o-search-preview live research + gpt-4o-mini parsing. Smoke-tested clean (9/9); first REAL
+  forecast posted to the $50k Summer tournament; autopilot active (every 20 min, full tournament mode).
+- NEXT: flywheel now persists data; let it accrue, run `resolve.py`/`benchmark.py` as questions resolve,
+  then implement the roadmap edges above (benchmark-gated).
