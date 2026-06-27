@@ -764,16 +764,38 @@ def _select_llms():
         os.getenv(k)
         for k in ("PERPLEXITY_API_KEY", "OPENROUTER_API_KEY", "EXA_API_KEY", "OPENAI_API_KEY")
     )
-    # OpenRouter / OpenAI: the SDK's own defaults already pick valid, search-capable models.
-    if os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY"):
+    # OpenRouter (free tournament credits): pin the high-EV free config — a REASONING
+    # model as the forecaster (AIB's #1 finding: "model > scaffolding") + gpt-4o-search-
+    # preview for LIVE web research + cheap gpt-4o-mini for the mechanical steps. All
+    # verified working on this key. (o4-mini is an o-series model → temperature MUST be 1.)
+    if os.getenv("OPENROUTER_API_KEY"):
+        return {
+            "default": GeneralLlm(model="openrouter/openai/o4-mini", temperature=1, timeout=120),
+            "researcher": GeneralLlm(model="openrouter/openai/gpt-4o-search-preview", temperature=0.1, timeout=90),
+            "summarizer": GeneralLlm(model="openrouter/openai/gpt-4o-mini", temperature=0.3),
+            "parser": GeneralLlm(model="openrouter/openai/gpt-4o-mini", temperature=0.3),
+        }
+    # Plain OpenAI key (no OpenRouter): the SDK's own defaults are fine.
+    if os.getenv("OPENAI_API_KEY"):
         return None
-    # Anthropic key present: default/summarizer/parser defaults are fine, but the
-    # researcher would wrongly hit the proxy. If a search backend exists (e.g. AskNews
-    # via CLIENT_ID+SECRET), let the SDK auto-select it; else research LLM-only.
+    # Anthropic key present. The SDK's own Anthropic defaults use BARE model strings
+    # (e.g. "claude-3-7-sonnet-latest") that litellm rejects ("LLM Provider NOT
+    # provided"), so pin every role to a verified, provider-prefixed model: a strong
+    # reasoning model (Sonnet 4.6) for forecasting + base-rate research, cheap Haiku
+    # for the mechanical summarize/parse steps.
     if os.getenv("ANTHROPIC_API_KEY"):
-        if has_search_backend:
-            return None
-        return {"researcher": GeneralLlm(model="claude-3-7-sonnet-latest", temperature=0.1)}
+        sonnet = "anthropic/claude-sonnet-4-6"  # verified available on this account
+        haiku = "anthropic/claude-haiku-4-5"
+        llms = {
+            "default": GeneralLlm(model=sonnet, temperature=0.4, timeout=90),
+            "summarizer": GeneralLlm(model=haiku, temperature=0.3),
+            "parser": GeneralLlm(model=haiku, temperature=0.3),
+        }
+        if not has_search_backend:
+            # No live search → research LLM-only on Sonnet. With AskNews set, leave
+            # researcher unset so the SDK auto-selects asknews/news-summaries.
+            llms["researcher"] = GeneralLlm(model=sonnet, temperature=0.1)
+        return llms
     # Metaculus-proxy-only fallback (works ONLY if the token has proxy credits).
     return {"researcher": GeneralLlm(model="metaculus/gpt-4o", temperature=0.1)}
 
