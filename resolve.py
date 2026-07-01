@@ -107,6 +107,42 @@ def main() -> None:
             }) + "\n")
     print(f"\nWrote {out} ({len(scored)} resolved) — the ground-truth that gates every change.")
 
+    _score_supervisor_shadow({rec.get("question_id"): o for _, o, rec in scored})
+
+
+def _score_supervisor_shadow(outcomes: dict) -> None:
+    """The shadow A/B: on questions where the supervisor FIRED and the question has
+    resolved, compare Brier(supervisor's revised p) vs Brier(submitted geo-odds p0).
+    This is the gate that decides whether the supervisor goes live.
+    Pull the log with: git show origin/data:supervisor.jsonl > data/supervisor.jsonl"""
+    sup_log = Path("data/supervisor.jsonl")
+    if not sup_log.exists():
+        return
+    fired = []
+    for line in sup_log.read_text().splitlines():
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if rec.get("fired") and rec.get("revised") is not None:
+            outcome = outcomes.get(rec.get("question_id"))
+            if outcome is not None:
+                fired.append((float(rec["p0"]), float(rec["revised"]), outcome, rec.get("confidence")))
+    if not fired:
+        print("\nSupervisor shadow A/B: no resolved fired-questions yet — still accruing.")
+        return
+    b0 = sum((p0 - o) ** 2 for p0, _, o, _ in fired) / len(fired)
+    b1 = sum((pr - o) ** 2 for _, pr, o, _ in fired) / len(fired)
+    hi = [(p0, pr, o) for p0, pr, o, c in fired if c == "high"]
+    print(f"\nSUPERVISOR SHADOW A/B ({len(fired)} resolved fired-questions):")
+    print(f"  geo-odds (submitted) Brier: {b0:.4f}")
+    print(f"  supervisor (shadow)  Brier: {b1:.4f}  {'← supervisor BETTER' if b1 < b0 else '← geo-odds better/tied'}")
+    if hi:
+        h0 = sum((p0 - o) ** 2 for p0, _, o in hi) / len(hi)
+        h1 = sum((pr - o) ** 2 for _, pr, o in hi) / len(hi)
+        print(f"  high-confidence only ({len(hi)}): geo-odds {h0:.4f} vs supervisor {h1:.4f}")
+    print("  Gate: flip use_supervisor=True only if the supervisor wins on ≥30 fired resolutions.")
+
 
 if __name__ == "__main__":
     main()

@@ -42,8 +42,13 @@ accumulated ground-truth + validated knob-settings are not, and they compound ea
   (NOT main; `data/*.jsonl` is gitignored locally). Pull it: `git fetch origin data && git show
   origin/data:forecasts.jsonl > data/forecasts.jsonl`. `resolve.py` joins forecasts→resolutions and
   reports Brier + a reliability table. `benchmark.py --ab` is the fast community-proxy A/B gate.
-- **HARD MERGE GATE:** no prompt/model/aggregation change ships unless it beats current on
-  `benchmark.py` over ≥100 questions across ≥2 runs (segment by binary/MC/numeric). Discipline IS the edge.
+- **HARD MERGE GATE:** no prompt/model/aggregation change ships unless it wins on data. Discipline IS the edge.
+  ⚠️ **CP is HIDDEN from bot accounts** (verified: 0 of our first 54 logged forecasts ever saw a community
+  prediction; the SDK Benchmarker's score-vs-CP therefore CANNOT run on our token — its question fetch
+  returns ~1 question site-wide). Gates that work: (1) **shadow mode** — run a candidate alongside the
+  submitted number on live questions, log both, compare Brier on our own resolutions via `resolve.py`
+  (leakage-free; the supervisor uses this). (2) `benchmark.py` vs CP only if a HUMAN-account token is
+  ever used for read-only eval (flag to Christian first).
 - **Roadmap (next edges, all in docs/competitive-edge-plan.md):** (1) multi-FAMILY ensemble
   (o4-mini + claude-sonnet-4-6 + another) governed by a private accuracy+divergence ledger — FIX the
   concurrency bug (5 draws run concurrently; don't mutate shared `self._llms`); (2) quant-source-data

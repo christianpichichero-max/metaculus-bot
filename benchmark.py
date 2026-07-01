@@ -1,4 +1,10 @@
-"""Offline benchmark harness — the merge gate for any bot change.
+"""Offline benchmark harness — scores bots against the community prediction.
+
+⚠️ LIMITATION (verified 2026-07-01): Metaculus HIDES community predictions from bot
+accounts, so with the bot's METACULUS_TOKEN this harness finds ~1 eligible question
+site-wide and cannot score. It works only with a human-account token (read-only eval).
+For bot-token-only validation use SHADOW MODE instead: run the candidate alongside the
+submitted number on live questions and compare Brier on our own resolutions (resolve.py).
 
 The clearest finding in the AIB data: testing changes on RESOLVED questions is the
 single largest correlate of tournament success. This runs the bot over N recently-
@@ -78,10 +84,47 @@ def _label(benchmark) -> str:
     )
 
 
+async def _fetch_benchmark_questions(n: int):
+    """Fetch benchmark-eligible questions ourselves (straight pagination) instead of
+    the SDK's randomized sampler, which can exhaust its 3 random pages and raise
+    'found 0, needed N'. Strict filter first, then relax until we have enough."""
+    import pendulum
+    from forecasting_tools import MetaculusClient
+    from forecasting_tools.helpers.metaculus_client import ApiFilter
+
+    client = MetaculusClient()
+    # cp_reveal_time_lt=now is the load-bearing constraint: the community prediction
+    # is HIDDEN on open questions until its reveal time, so without it the
+    # community_prediction_exists post-filter drops essentially everything
+    # (the cause of the SDK sampler's "found 0, needed 100" crash).
+    now = pendulum.now(tz="UTC")
+    tiers = [
+        ("strict", ApiFilter(allowed_statuses=["open"], allowed_types=["binary"],
+                             cp_reveal_time_lt=now, num_forecasters_gte=30,
+                             includes_bots_in_aggregates=False,
+                             community_prediction_exists=True)),
+        ("relaxed", ApiFilter(allowed_statuses=["open"], allowed_types=["binary"],
+                              cp_reveal_time_lt=now, num_forecasters_gte=10,
+                              community_prediction_exists=True)),
+    ]
+    for label, api_filter in tiers:
+        questions = await client.get_questions_matching_filter(
+            api_filter, num_questions=n, randomly_sample=False,
+            error_if_question_target_missed=False,
+        )
+        print(f"question fetch [{label}]: {len(questions)} eligible")
+        if len(questions) >= min(n, 60):
+            return questions[:n]
+    return questions[:n]  # best effort — caller sees the count printed above
+
+
 async def run(bots, n: int):
+    questions = await _fetch_benchmark_questions(n)
+    if not questions:
+        raise SystemExit("No benchmark-eligible questions found — try again later.")
     benchmarker = Benchmarker(
         forecast_bots=bots,
-        number_of_questions_to_use=n,
+        questions_to_use=questions,
         file_path_to_save_reports="benchmarks/",
     )
     return await benchmarker.run_benchmark()

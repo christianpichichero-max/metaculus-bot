@@ -157,9 +157,15 @@ class EdgeForecastBot(ForecastBot):
     # Agentic supervisor (binary-only v1, AIA-Forecaster pattern, arXiv 2511.07678):
     # when the 5 draws DISAGREE, run fresh targeted searches on the specific
     # disagreement, then override the geo-mean ONLY on a high-confidence verdict —
-    # otherwise fall back, so it cannot make a forecast worse by design. Ships OFF
-    # until it passes the benchmark gate (CLAUDE.md merge rule).
+    # otherwise fall back, so it cannot make a forecast worse by design.
+    # use_supervisor=True  -> supervisor verdict is SUBMITTED (gate must pass first).
+    # supervisor_shadow=True -> supervisor runs + logs its verdict but geo-odds is
+    #   still submitted. Community predictions are HIDDEN from bot accounts, so the
+    #   community-proxy benchmark can't score us — shadow mode makes the tournament
+    #   itself the A/B: resolve.py compares Brier(supervisor) vs Brier(geo-odds) on
+    #   our own resolved questions, leakage-free.
     use_supervisor: bool = False
+    supervisor_shadow: bool = False
     supervisor_min_spread: float = 0.15  # only fire when max-min draw spread ≥ this
     SUPERVISOR_LOG = Path("data/supervisor.jsonl")
 
@@ -209,14 +215,16 @@ class EdgeForecastBot(ForecastBot):
             log_odds = [math.log(clamp(p) / (1.0 - clamp(p))) for p in predictions]
             o = math.exp(sum(log_odds) / len(log_odds))
             p0 = clamp(o / (1.0 + o))
-            if self.use_supervisor and len(predictions) >= 3:
+            if (self.use_supervisor or self.supervisor_shadow) and len(predictions) >= 3:
                 try:
-                    return await self._supervise_binary(
+                    p_supervised = await self._supervise_binary(
                         question, [clamp(p) for p in predictions], notes, p0
                     )
+                    if self.use_supervisor:  # live: submit the supervised number
+                        return p_supervised
                 except Exception as exc:
                     logger.warning(f"supervisor failed ({exc}); using geo-odds aggregate")
-            return p0
+            return p0  # shadow mode (or supervisor off/failed): submit geo-odds
 
         if isinstance(question, MultipleChoiceQuestion):
             option_names = [opt.option_name for opt in predictions[0].predicted_options]
@@ -259,6 +267,8 @@ class EdgeForecastBot(ForecastBot):
         record: dict = {
             "at": datetime.now(timezone.utc).isoformat(),
             "url": getattr(question, "page_url", None),
+            "question_id": getattr(question, "id_of_post", None),
+            "mode": "live" if self.use_supervisor else "shadow",
             "p0": round(p0, 4),
             "draws": [round(p, 3) for p in draw_ps],
             "spread": round(spread, 3),
@@ -1005,6 +1015,10 @@ if __name__ == "__main__":
         extra_metadata_in_explanation=True,
         llms=_select_llms(),
     )
+    # Supervisor runs in SHADOW: it investigates disagreements and logs its verdict,
+    # but geo-odds is what gets submitted. resolve.py compares the two on our own
+    # resolved questions; the supervisor goes live only if it wins that comparison.
+    bot.supervisor_shadow = True
 
     # Per-mode tournament URL shown in the summary banner footer. These
     # piggyback on the forecasting_tools SDK constants and need updating
