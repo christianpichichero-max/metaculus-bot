@@ -36,7 +36,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def make_bot(aggregation_method: str, use_base_rate_research: bool = True) -> EdgeForecastBot:
+def make_bot(
+    aggregation_method: str,
+    use_base_rate_research: bool = True,
+    use_supervisor: bool = False,
+) -> EdgeForecastBot:
     bot = EdgeForecastBot(
         research_reports_per_question=1,
         predictions_per_research_report=5,
@@ -48,6 +52,7 @@ def make_bot(aggregation_method: str, use_base_rate_research: bool = True) -> Ed
     )
     bot.aggregation_method = aggregation_method
     bot.use_base_rate_research = use_base_rate_research
+    bot.use_supervisor = use_supervisor
     return bot
 
 
@@ -84,24 +89,36 @@ async def run(bots, n: int):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Offline benchmark harness for the forecasting bot")
-    parser.add_argument("--questions", type=int, default=120, help="resolved questions to test on (100+ recommended)")
+    parser.add_argument("--questions", type=int, default=120, help="questions to test on (100+ recommended)")
     parser.add_argument("--ab", action="store_true", help="A/B geo_odds vs sdk_default aggregation")
+    parser.add_argument("--ab-supervisor", action="store_true", help="A/B supervisor ON vs OFF (both geo_odds)")
     parser.add_argument("--no-base-rates", action="store_true", help="disable the base-rate research pass")
+    parser.add_argument("--concurrency", type=int, default=3, help="concurrent questions (research semaphore)")
     args = parser.parse_args()
 
+    # The research semaphore is a class attribute; widen it for benchmark throughput.
+    EdgeForecastBot._max_concurrent_questions = args.concurrency
+    EdgeForecastBot._concurrency_limiter = asyncio.Semaphore(args.concurrency)
+
     use_br = not args.no_base_rates
-    if args.ab:
+    if args.ab_supervisor:
+        labels = ["supervisor-ON", "supervisor-OFF"]
+        bots = [make_bot("geo_odds", use_br, use_supervisor=True), make_bot("geo_odds", use_br, use_supervisor=False)]
+        print(f"A/B: supervisor ON vs OFF over {args.questions} Qs (geo_odds, base_rates={use_br})")
+    elif args.ab:
+        labels = ["geo_odds", "sdk_default"]
         bots = [make_bot("geo_odds", use_br), make_bot("sdk_default", use_br)]
-        print(f"A/B: geo_odds vs sdk_default aggregation over {args.questions} resolved Qs (base_rates={use_br})")
+        print(f"A/B: geo_odds vs sdk_default aggregation over {args.questions} Qs (base_rates={use_br})")
     else:
+        labels = ["current"]
         bots = [make_bot("geo_odds", use_br)]
-        print(f"Benchmarking current bot (geo_odds, base_rates={use_br}) over {args.questions} resolved Qs")
+        print(f"Benchmarking current bot (geo_odds, base_rates={use_br}) over {args.questions} Qs")
 
     results = asyncio.run(run(bots, args.questions))
 
     print("\n" + "=" * 72)
     print("BENCHMARK RESULTS (scored vs community prediction; higher = better):")
-    for b in results:
-        print(f"  • {_label(b)}: {_score_of(b)}")
+    for label, b in zip(labels, results):
+        print(f"  • {label}: {_score_of(b)}")
     print("Reports saved under benchmarks/. Use 100+ Qs and multiple runs before trusting a small delta.")
     print("=" * 72 + "\n")

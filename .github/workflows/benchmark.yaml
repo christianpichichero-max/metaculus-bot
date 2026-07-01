@@ -1,0 +1,57 @@
+name: Benchmark A/B
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "What to A/B"
+        type: choice
+        options: [supervisor-ab, aggregation-ab, single]
+        default: supervisor-ab
+      questions:
+        description: "Number of questions"
+        default: "100"
+      concurrency:
+        description: "Concurrent questions"
+        default: "4"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run benchmark
+        run: |
+          FLAG="--ab-supervisor"
+          if [ "${{ inputs.mode }}" = "aggregation-ab" ]; then FLAG="--ab"; fi
+          if [ "${{ inputs.mode }}" = "single" ]; then FLAG=""; fi
+          python benchmark.py $FLAG --questions "${{ inputs.questions }}" --concurrency "${{ inputs.concurrency }}"
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ github.run_id }}
+          path: |
+            benchmarks/
+            data/supervisor.jsonl
+          if-no-files-found: ignore

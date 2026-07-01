@@ -55,7 +55,8 @@ jobs:
           D="$(mktemp -d)"
           if git clone --quiet --depth 1 --branch data "$REPO" "$D" 2>/dev/null; then
             cat data/forecasts.jsonl >> "$D/forecasts.jsonl"
-            ( cd "$D" && git add forecasts.jsonl && git commit --quiet -m "forecasts $(date -u +%FT%TZ)" && git push --quiet origin data ) \
+            [ -s data/supervisor.jsonl ] && cat data/supervisor.jsonl >> "$D/supervisor.jsonl"
+            ( cd "$D" && git add -A && git commit --quiet -m "forecasts $(date -u +%FT%TZ)" && git push --quiet origin data ) \
               && echo "appended to existing data branch"
           else
             cd "$D"

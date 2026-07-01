@@ -1,9 +1,12 @@
 import argparse
 import asyncio
+import json
 import logging
 import math
 import os
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 import dotenv
@@ -151,11 +154,51 @@ class EdgeForecastBot(ForecastBot):
     # technique). Costs one extra LLM call per question; closes the gap where the
     # news dump lacks base rates so the forecaster would otherwise confabulate them.
     use_base_rate_research: bool = True
+    # Agentic supervisor (binary-only v1, AIA-Forecaster pattern, arXiv 2511.07678):
+    # when the 5 draws DISAGREE, run fresh targeted searches on the specific
+    # disagreement, then override the geo-mean ONLY on a high-confidence verdict —
+    # otherwise fall back, so it cannot make a forecast worse by design. Ships OFF
+    # until it passes the benchmark gate (CLAUDE.md merge rule).
+    use_supervisor: bool = False
+    supervisor_min_spread: float = 0.15  # only fire when max-min draw spread ≥ this
+    SUPERVISOR_LOG = Path("data/supervisor.jsonl")
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Per-question draw rationales for the supervisor (instance-level so A/B
+        # bot pairs in the Benchmarker don't cross-contaminate).
+        self._draw_notes: dict[str, list[dict]] = {}
+        self._draw_notes_lock = asyncio.Lock()
+
+    @staticmethod
+    def _question_key(question: MetaculusQuestion) -> str:
+        return getattr(question, "page_url", "") or str(getattr(question, "id_of_post", id(question)))
+
+    async def _make_prediction(self, question, research):
+        """Record each binary draw's probability + rationale so the supervisor can
+        read WHERE the draws disagree (the framework only hands values to the
+        aggregator, not reasonings)."""
+        reasoned = await super()._make_prediction(question, research)
+        try:
+            if isinstance(question, BinaryQuestion) and isinstance(reasoned.prediction_value, float):
+                async with self._draw_notes_lock:
+                    self._draw_notes.setdefault(self._question_key(question), []).append(
+                        {"p": reasoned.prediction_value, "reasoning": str(reasoned.reasoning or "")[:600]}
+                    )
+        except Exception:  # bookkeeping must never break a forecast
+            pass
+        return reasoned
 
     async def _aggregate_predictions(self, predictions, question):
         """Geometric mean of odds for binary + multiple-choice; SDK default
         (per-percentile median) for numeric/date. Pooling odds is better-calibrated
-        than the median on real Metaculus questions and uses every draw."""
+        than the median on real Metaculus questions and uses every draw. Binary can
+        additionally route through the agentic supervisor when enabled."""
+        notes: list[dict] = []
+        if isinstance(question, BinaryQuestion):
+            async with self._draw_notes_lock:  # always drain, even on non-geo paths
+                notes = self._draw_notes.pop(self._question_key(question), [])
+
         if self.aggregation_method != "geo_odds" or not predictions:
             return await super()._aggregate_predictions(predictions, question)
 
@@ -165,7 +208,15 @@ class EdgeForecastBot(ForecastBot):
         if isinstance(question, BinaryQuestion):
             log_odds = [math.log(clamp(p) / (1.0 - clamp(p))) for p in predictions]
             o = math.exp(sum(log_odds) / len(log_odds))
-            return clamp(o / (1.0 + o))
+            p0 = clamp(o / (1.0 + o))
+            if self.use_supervisor and len(predictions) >= 3:
+                try:
+                    return await self._supervise_binary(
+                        question, [clamp(p) for p in predictions], notes, p0
+                    )
+                except Exception as exc:
+                    logger.warning(f"supervisor failed ({exc}); using geo-odds aggregate")
+            return p0
 
         if isinstance(question, MultipleChoiceQuestion):
             option_names = [opt.option_name for opt in predictions[0].predicted_options]
@@ -189,6 +240,112 @@ class EdgeForecastBot(ForecastBot):
 
         # numeric / date / conditional → SDK's per-percentile median (don't extremize tails)
         return await super()._aggregate_predictions(predictions, question)
+
+    ################################## SUPERVISOR ##################################
+
+    async def _supervise_binary(
+        self,
+        question: BinaryQuestion,
+        draw_ps: list[float],
+        notes: list[dict],
+        p0: float,
+    ) -> float:
+        """Agentic reconciliation of disagreeing draws (AIA-Forecaster pattern):
+        (1) skip when draws already agree; (2) a search model investigates the
+        SPECIFIC disagreement with fresh live searches; (3) a judge model issues a
+        verdict that only overrides the geo-mean at high confidence. Every decision
+        is logged to data/supervisor.jsonl for the flywheel."""
+        spread = max(draw_ps) - min(draw_ps)
+        record: dict = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "url": getattr(question, "page_url", None),
+            "p0": round(p0, 4),
+            "draws": [round(p, 3) for p in draw_ps],
+            "spread": round(spread, 3),
+            "fired": False,
+            "used": "geo_odds",
+        }
+        if spread < self.supervisor_min_spread:
+            self._log_supervisor(record)
+            return p0
+
+        record["fired"] = True
+        gists = "\n".join(
+            f"- Draw {i + 1} said {n['p']:.0%}: {n['reasoning'][:350]}"
+            for i, n in enumerate(notes)
+        ) or "\n".join(f"- Draw {i + 1} said {p:.0%}" for i, p in enumerate(draw_ps))
+
+        search_prompt = clean_indents(
+            f"""
+            Several independent forecasters disagree on this question. Your job is to
+            resolve their SPECIFIC disagreement with fresh, current information.
+
+            Question: {question.question_text}
+            Resolution criteria: {question.resolution_criteria}
+            Today is {datetime.now().strftime("%Y-%m-%d")}.
+
+            The forecasters' positions:
+            {gists}
+
+            First, name the 1-3 pivotal factual cruxes their disagreement turns on.
+            Then search the live web to resolve each crux, and report concrete,
+            dated findings. Use primary news/data sources; do NOT cite prediction-market
+            or forecasting-aggregator pages (Metaculus, Polymarket, Kalshi). Do not
+            output a probability — findings only.
+            """
+        )
+        researcher = self.get_llm("researcher")
+        search_llm = researcher if isinstance(researcher, GeneralLlm) else self.get_llm("default", "llm")
+        findings = await search_llm.invoke(search_prompt)
+
+        judge_prompt = clean_indents(
+            f"""
+            You are the supervising forecaster reconciling disagreeing estimates.
+
+            Question: {question.question_text}
+            Resolution criteria: {question.resolution_criteria}
+            Today is {datetime.now().strftime("%Y-%m-%d")}.
+
+            Independent estimates: {", ".join(f"{p:.0%}" for p in draw_ps)}
+            Their current pooled aggregate: {p0:.0%}
+
+            Fresh targeted research on their disagreement:
+            {findings}
+
+            Decide whether the fresh evidence clearly resolves the disagreement.
+            Report confidence "high" ONLY if the findings decisively favor one side;
+            if the evidence is mixed, stale, or inconclusive, report "low" — the
+            pooled aggregate will then stand, which is the safe default.
+
+            The last two lines you write must be exactly:
+            Probability: ZZ%
+            Confidence: high|medium|low
+            """
+        )
+        verdict = await self.get_llm("default", "llm").invoke(judge_prompt)
+        prob_match = re.search(r"Probability:\s*([0-9]+(?:\.[0-9]+)?)\s*%", verdict or "")
+        conf_match = re.search(r"Confidence:\s*(high|medium|low)", verdict or "", re.IGNORECASE)
+        record["confidence"] = conf_match.group(1).lower() if conf_match else None
+        if prob_match:
+            record["revised"] = round(max(0.01, min(0.99, float(prob_match.group(1)) / 100.0)), 4)
+
+        if record.get("confidence") == "high" and "revised" in record:
+            record["used"] = "supervisor"
+            self._log_supervisor(record)
+            logger.info(
+                f"supervisor OVERRIDE {record['url']}: {p0:.2f} -> {record['revised']:.2f} (spread {spread:.2f})"
+            )
+            return float(record["revised"])
+        self._log_supervisor(record)
+        return p0
+
+    def _log_supervisor(self, record: dict) -> None:
+        try:
+            self.SUPERVISOR_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with self.SUPERVISOR_LOG.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        except Exception as exc:
+            logger.warning(f"supervisor log write failed: {exc}")
 
     ##################################### RESEARCH #####################################
 
