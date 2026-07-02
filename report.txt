@@ -1,0 +1,3 @@
+58 log lines | 58 unique questions
+32 binary forecasts; fetching resolutions...
+No resolved binary questions yet — the flywheel is still accruing. Re-run as questions resolve.
