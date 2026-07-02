@@ -43,7 +43,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          COUNT=$(grep -oE "RESOLVED binary: [0-9]+" report.txt | grep -oE "[0-9]+" || echo 0)
+          COUNT=$(grep -oE "RESOLVED binary: [0-9]+" report.txt | grep -oE "[0-9]+" | head -1 || true)
+          COUNT=${COUNT:-0}
           LAST=$(git show origin/data:last_reported_count 2>/dev/null || echo 0)
           echo "resolved now: $COUNT | last reported: $LAST"
           REPO="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
@@ -55,17 +56,8 @@ jobs:
           [ -f data/resolved.jsonl ] && cp data/resolved.jsonl "$D/resolved.jsonl"
           if [ "$COUNT" -gt "$LAST" ]; then
             echo "$COUNT" > "$D/last_reported_count"
-            printf "date: %s\nresolved: %s (was %s)\n" "$(date -u +%FT%TZ)" "$COUNT" "$LAST" > "$D/NEWS.md"
-            cat report.txt >> "$D/NEWS.md"
-            gh issue create \
-              --title "📊 Chrispbacon-bot: $COUNT resolved question(s) — new scores are in" \
-              --body "@christianpichichero-max first/new resolutions just landed. Report:
-
-\`\`\`
-$(cat report.txt)
-\`\`\`
-
-Leaderboard: https://www.metaculus.com/tournament/summer-futureeval-2026/ · Profile: https://www.metaculus.com/accounts/profile/303904/" \
-              --repo "$GITHUB_REPOSITORY" || echo "issue creation failed (non-fatal)"
+            { printf 'date: %s\nresolved: %s (was %s)\n\n' "$(date -u +%FT%TZ)" "$COUNT" "$LAST"; cat report.txt; } > "$D/NEWS.md"
+            { printf '@christianpichichero-max new resolutions just landed. Report:\n\n```\n'; cat report.txt; printf '```\n\nLeaderboard: https://www.metaculus.com/tournament/summer-futureeval-2026/\nProfile: https://www.metaculus.com/accounts/profile/303904/\n'; } > /tmp/issue_body.md
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "Chrispbacon-bot: $COUNT resolved question(s) - new scores are in" --body-file /tmp/issue_body.md || echo "issue creation failed (non-fatal)"
           fi
           ( cd "$D" && git add -A && git commit --quiet -m "daily report $(date -u +%FT%TZ)" && git push --quiet origin data ) || echo "nothing to commit"
