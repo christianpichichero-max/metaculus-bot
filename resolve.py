@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -44,20 +45,28 @@ def _records() -> list[dict]:
     return out
 
 
-def _fetch_resolution(post_id) -> str | None:
-    """Return the binary resolution ('yes'/'no'), or None if open/unknown."""
-    try:
-        r = requests.get(
-            f"{API}/posts/{post_id}/",
-            headers={"Authorization": f"Token {TOKEN}"},
-            timeout=20,
-        )
-        if r.status_code != 200:
-            return None
-        q = (r.json() or {}).get("question") or {}
-        return q.get("resolution")
-    except Exception:
-        return None
+def _fetch_resolution(post_id):
+    """Return (fetched_ok, resolution). resolution is 'yes'/'no' if resolved, None if
+    still open/unresolved. fetched_ok=False means the request FAILED after retries
+    (rate limit / error) — so the caller must NOT miscount that as 'unresolved' and
+    silently miss a real score. Retries with backoff on 429/5xx."""
+    for attempt in range(4):
+        try:
+            r = requests.get(
+                f"{API}/posts/{post_id}/",
+                headers={"Authorization": f"Token {TOKEN}"},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                q = (r.json() or {}).get("question") or {}
+                return True, q.get("resolution")
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return True, None  # a definitive non-200 (e.g. 404) → treat as no-resolution
+        except Exception:
+            time.sleep(1.5 * (attempt + 1))
+    return False, None
 
 
 def main() -> None:
@@ -75,11 +84,22 @@ def main() -> None:
     print(f"{len(binary)} binary forecasts; fetching resolutions...")
 
     scored = []  # (p, outcome, rec)
+    failures = 0
     for qid, rec in binary:
-        res = _fetch_resolution(qid)
+        ok, res = _fetch_resolution(qid)
+        if not ok:
+            failures += 1
+            continue
         if res in ("yes", "no"):
             p = max(0.001, min(0.999, float(rec["prediction"])))
             scored.append((p, 1.0 if res == "yes" else 0.0, rec))
+        time.sleep(0.35)  # be gentle on the API to avoid rate-limit gaps
+
+    if failures:
+        # Loud on purpose: a silent under-count on resolution day would defeat the
+        # whole watch system. Exit non-zero so the daily workflow surfaces it.
+        print(f"WARNING: {failures} of {len(binary)} questions could not be fetched "
+              "(rate limit/error). Report may be INCOMPLETE — re-run.")
 
     if not scored:
         print("No resolved binary questions yet — the flywheel is still accruing. Re-run as questions resolve.")
