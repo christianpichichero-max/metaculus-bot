@@ -326,11 +326,15 @@ def main() -> None:
         print(f"\nWrote {out} ({total_resolved} resolved) — the ground-truth that gates every change.")
 
     outcomes = {}
+    submitted = {}
     for p, o, rec in bin_scored:
         outcomes[rec.get("question_id")] = o
+        submitted[rec.get("question_id")] = p
         if rec.get("question_sub_id") is not None:
             outcomes[("sub", rec.get("question_sub_id"))] = o
+            submitted[("sub", rec.get("question_sub_id"))] = p
     _score_supervisor_shadow(outcomes)
+    _score_blf_shadow(outcomes, submitted)
 
     if failures:
         sys.exit(2)
@@ -378,6 +382,42 @@ def _score_supervisor_shadow(outcomes: dict) -> None:
         h1 = sum((pr - o) ** 2 for _, pr, o in hi) / len(hi)
         print(f"  high-confidence overrides ({len(hi)}): geo-odds {h0:.4f} vs supervisor {h1:.4f}")
     print("  Gate: flip use_supervisor=True only if ship-policy wins on ≥30 fired resolutions.")
+
+
+def _score_blf_shadow(outcomes: dict, submitted: dict) -> None:
+    """Belief-loop shadow A/B: Brier(BLF forecast) vs Brier(submitted geo-odds) on our
+    own resolutions. The BLF earns the forecaster seat only by winning here.
+    Pull the log with: git show origin/data:blf.jsonl > data/blf.jsonl"""
+    blf_log = Path("data/blf.jsonl")
+    if not blf_log.exists():
+        return
+    pairs = []  # (p_blf, p_submitted, outcome)
+    for line in blf_log.read_text().splitlines():
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        p_blf = rec.get("p_blf")
+        if p_blf is None:
+            continue
+        key = rec.get("question_id")
+        outcome = outcomes.get(key)
+        p_sub = submitted.get(key)
+        if outcome is None and rec.get("id_of_question") is not None:
+            outcome = outcomes.get(("sub", rec.get("id_of_question")))
+            p_sub = submitted.get(("sub", rec.get("id_of_question")))
+        if outcome is not None and p_sub is not None:
+            pairs.append((float(p_blf), float(p_sub), outcome))
+    if not pairs:
+        print("\nBLF shadow A/B: no resolved BLF-forecast questions yet — still accruing.")
+        return
+    b_blf = sum((pb - o) ** 2 for pb, _, o in pairs) / len(pairs)
+    b_sub = sum((ps - o) ** 2 for _, ps, o in pairs) / len(pairs)
+    print(f"\nBLF SHADOW A/B ({len(pairs)} resolved):")
+    print(f"  submitted (ensemble geo-odds) Brier: {b_sub:.4f}")
+    print(f"  belief-loop (shadow)          Brier: {b_blf:.4f}  "
+          f"{'← BLF BETTER' if b_blf < b_sub else '← ensemble better/tied'}")
+    print("  Gate: promote the BLF to the forecaster seat only if it wins on ≥40 resolutions.")
 
 
 if __name__ == "__main__":

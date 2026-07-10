@@ -245,6 +245,15 @@ class EdgeForecastBot(ForecastBot):
     supervisor_shadow: bool = False
     supervisor_min_spread: float = 0.15  # only fire when max-min draw spread ≥ this
     SUPERVISOR_LOG = Path("data/supervisor.jsonl")
+    # Belief-state loop (BLF, arXiv 2604.18576 — matched the superforecaster median;
+    # ablating the belief state cost more than removing web search entirely). SHADOW
+    # ONLY: runs the iterative search→belief-update loop on binary questions, logs its
+    # forecast to data/blf.jsonl, and NEVER touches the submission. resolve.py scores
+    # it against the submitted geo-odds on our own resolutions; it earns the forecaster
+    # seat only by winning that comparison (same gate discipline as the supervisor).
+    use_blf_shadow: bool = False
+    blf_update_rounds: int = 2  # targeted-search→belief-update iterations after init
+    BLF_LOG = Path("data/blf.jsonl")
     # Stamped into supervisor/draw records so the flywheel never pools pre/post-ensemble
     # populations into one gate. Bump when the draw composition changes.
     ENSEMBLE_VERSION = "v1-mono-o4mini"
@@ -557,6 +566,115 @@ class EdgeForecastBot(ForecastBot):
                 f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
         except Exception as exc:
             logger.warning(f"supervisor log write failed: {exc}")
+
+    ################################ BELIEF-STATE LOOP ################################
+
+    async def _research_and_make_predictions(self, question):
+        result = await super()._research_and_make_predictions(question)
+        if self.use_blf_shadow and isinstance(question, BinaryQuestion):
+            try:
+                await asyncio.wait_for(
+                    self._blf_shadow(question, result.research_report), timeout=420
+                )
+            except Exception as exc:  # shadow work can never affect submissions
+                logger.warning(f"BLF shadow failed ({exc}); submission unaffected")
+        return result
+
+    async def _blf_shadow(self, question: BinaryQuestion, research: str) -> None:
+        """One evolving belief object, refined by targeted searches: initialize a
+        belief from the existing research, then each round ask what single piece of
+        missing evidence would most change the probability, fetch exactly that, and
+        rewrite the belief. The final probability is logged for the shadow A/B."""
+        judge = self.get_llm("default", "llm")
+        researcher = self.get_llm("researcher")
+        search_llm = researcher if isinstance(researcher, GeneralLlm) else judge
+
+        header = clean_indents(
+            f"""
+            Question: {question.question_text}
+            Resolution criteria: {question.resolution_criteria}
+            {question.fine_print}
+            Today is {datetime.now().strftime("%Y-%m-%d")}.
+            """
+        )
+        belief = await judge.invoke(clean_indents(
+            f"""
+            You are a calibrated superforecaster maintaining an explicit BELIEF STATE.
+            {header}
+            Research so far:
+            {research}
+
+            Write your belief state with exactly these sections:
+            PROBABILITY: ZZ%
+            EVIDENCE FOR: (bullet list)
+            EVIDENCE AGAINST: (bullet list)
+            KEY UNCERTAINTIES: (bullet list — what you do NOT yet know that most moves the probability)
+            """
+        ))
+
+        for round_i in range(max(0, int(self.blf_update_rounds))):
+            ask = await judge.invoke(clean_indents(
+                f"""
+                {header}
+                Your current belief state:
+                {belief}
+
+                From KEY UNCERTAINTIES, pick the SINGLE question whose answer would most
+                change your probability, and write one web search query that would answer
+                it. Reply with exactly two lines:
+                CRUX: <the question>
+                QUERY: <the search query>
+                """
+            ))
+            crux_m = re.search(r"CRUX:\s*(.+)", ask or "")
+            query_m = re.search(r"QUERY:\s*(.+)", ask or "")
+            crux = crux_m.group(1).strip() if crux_m else ""
+            query = query_m.group(1).strip() if query_m else ""
+            if not query:
+                break
+            findings = await search_llm.invoke(clean_indents(
+                f"""
+                Search the live web to answer this specific question with concrete, dated
+                findings. Use primary news/data sources; do NOT cite prediction-market or
+                forecasting-aggregator pages (Metaculus, Polymarket, Kalshi).
+                Question: {crux or query}
+                Search: {query}
+                """
+            ))
+            belief = await judge.invoke(clean_indents(
+                f"""
+                {header}
+                Your previous belief state:
+                {belief}
+
+                New targeted findings on your biggest uncertainty:
+                {findings}
+
+                Rewrite the FULL belief state, updating the probability only as far as the
+                evidence warrants (anchor to base rates; never 0% or 100%). Same format:
+                PROBABILITY: ZZ%
+                EVIDENCE FOR:
+                EVIDENCE AGAINST:
+                KEY UNCERTAINTIES:
+                """
+            ))
+
+        m = re.search(r"PROBABILITY:\s*([0-9]+(?:\.[0-9]+)?)\s*%", belief or "")
+        record = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "url": getattr(question, "page_url", None),
+            "question_id": getattr(question, "id_of_post", None),
+            "id_of_question": getattr(question, "id_of_question", None),
+            "ensemble": self.ENSEMBLE_VERSION,
+            "rounds": self.blf_update_rounds,
+            "p_blf": (max(0.01, min(0.99, float(m.group(1)) / 100.0)) if m else None),
+        }
+        try:
+            self.BLF_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with self.BLF_LOG.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning(f"BLF log write failed: {exc}")
 
     ##################################### RESEARCH #####################################
 
@@ -1334,6 +1452,9 @@ if __name__ == "__main__":
     # but geo-odds is what gets submitted. resolve.py compares the two on our own
     # resolved questions; the supervisor goes live only if it wins that comparison.
     bot.supervisor_shadow = True
+    # Belief-state loop auditions the same way: shadow forecast on every binary,
+    # logged to data/blf.jsonl, never submitted until it wins on resolutions.
+    bot.use_blf_shadow = True
 
     # Per-mode tournament URL shown in the summary banner footer. These
     # piggyback on the forecasting_tools SDK constants and need updating
