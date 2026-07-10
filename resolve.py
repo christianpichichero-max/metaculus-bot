@@ -46,10 +46,12 @@ def _records() -> list[dict]:
 
 
 def _fetch_resolution(post_id):
-    """Return (fetched_ok, resolution). resolution is 'yes'/'no' if resolved, None if
-    still open/unresolved. fetched_ok=False means the request FAILED after retries
-    (rate limit / error) — so the caller must NOT miscount that as 'unresolved' and
-    silently miss a real score. Retries with backoff on 429/5xx."""
+    """Return (fetched_ok, resolution, my_forecasts). resolution is 'yes'/'no' if
+    resolved, None if still open. my_forecasts is the question's my_forecasts blob
+    (may carry OFFICIAL score_data after resolution — spot-peer is the tournament
+    objective and cannot be home-brewed since rivals' forecasts are hidden).
+    fetched_ok=False means the request FAILED after retries (rate limit/error) — the
+    caller must NOT miscount that as 'unresolved'. Retries with backoff on 429/5xx."""
     for attempt in range(4):
         try:
             r = requests.get(
@@ -59,14 +61,33 @@ def _fetch_resolution(post_id):
             )
             if r.status_code == 200:
                 q = (r.json() or {}).get("question") or {}
-                return True, q.get("resolution")
+                return True, q.get("resolution"), q.get("my_forecasts")
             if r.status_code in (429, 500, 502, 503, 504):
                 time.sleep(1.5 * (attempt + 1))
                 continue
-            return True, None  # a definitive non-200 (e.g. 404) → treat as no-resolution
+            return True, None, None  # definitive non-200 (e.g. 404) → no-resolution
         except Exception:
             time.sleep(1.5 * (attempt + 1))
-    return False, None
+    return False, None, None
+
+
+def _extract_scores(my_forecasts) -> dict:
+    """Defensively pull official score fields if present. Schema probe: when a
+    resolved question carries my_forecasts but no recognizable scores, we print its
+    keys once so the next daily report reveals the true schema at zero extra cost."""
+    out: dict = {}
+    try:
+        mf = my_forecasts or {}
+        sd = mf.get("score_data") or {}
+        for k in ("spot_peer_score", "spot_baseline_score", "peer_score", "baseline_score", "coverage"):
+            if sd.get(k) is not None:
+                out[k] = sd[k]
+        latest = mf.get("latest") or {}
+        if latest.get("forecast_values") is not None:
+            out["submitted_values"] = latest["forecast_values"]
+    except Exception:
+        pass
+    return out
 
 
 def main() -> None:
@@ -84,15 +105,30 @@ def main() -> None:
     print(f"{len(binary)} binary forecasts; fetching resolutions...")
 
     scored = []  # (p, outcome, rec)
+    official = []  # (qid, extracted score fields)
+    probe_printed = False
     failures = 0
     for qid, rec in binary:
-        ok, res = _fetch_resolution(qid)
+        ok, res, mf = _fetch_resolution(qid)
         if not ok:
             failures += 1
             continue
         if res in ("yes", "no"):
             p = max(0.001, min(0.999, float(rec["prediction"])))
             scored.append((p, 1.0 if res == "yes" else 0.0, rec))
+            fields = _extract_scores(mf)
+            if fields:
+                rec["official"] = fields
+                if any(k.endswith("_score") for k in fields):
+                    official.append((qid, fields))
+                elif not probe_printed:
+                    print(f"score_data ABSENT on resolved {qid} — my_forecasts keys: "
+                          f"{sorted((mf or {}).keys())}")
+                    probe_printed = True
+            elif mf is not None and not probe_printed:
+                print(f"score_data ABSENT on resolved {qid} — my_forecasts keys: "
+                      f"{sorted((mf or {}).keys())}")
+                probe_printed = True
         time.sleep(0.35)  # be gentle on the API to avoid rate-limit gaps
 
     if failures:
@@ -118,12 +154,18 @@ def main() -> None:
         if ys:
             print(f"  {b*10:>2}-{b*10+10:>3}% | n={len(ys):>3} | actual {sum(ys)/len(ys):.0%}")
 
+    if official:
+        spot_total = sum(f.get("spot_peer_score", 0.0) for _, f in official)
+        print(f"\nOFFICIAL scores captured on {len(official)} question(s): "
+              f"SPOT PEER total = {spot_total:.2f} (prize share ∝ max(0, total)²)")
+
     out = Path("data/resolved.jsonl")
     with out.open("w") as f:
         for p, o, rec in scored:
             f.write(json.dumps({
                 "question_id": rec.get("question_id"), "p": p, "outcome": o,
                 "brier": (p - o) ** 2, "url": rec.get("url"),
+                "official": rec.get("official"),
             }) + "\n")
     print(f"\nWrote {out} ({len(scored)} resolved) — the ground-truth that gates every change.")
 
@@ -151,17 +193,25 @@ def _score_supervisor_shadow(outcomes: dict) -> None:
     if not fired:
         print("\nSupervisor shadow A/B: no resolved fired-questions yet — still accruing.")
         return
+    # POLICY-FAITHFUL headline: live mode only submits the revision at confidence
+    # 'high' (else it submits p0) — so score exactly that policy, not the
+    # counterfactual 'always trust the supervisor'.
     b0 = sum((p0 - o) ** 2 for p0, _, o, _ in fired) / len(fired)
-    b1 = sum((pr - o) ** 2 for _, pr, o, _ in fired) / len(fired)
+    b_policy = sum(
+        ((pr if c == "high" else p0) - o) ** 2 for p0, pr, o, c in fired
+    ) / len(fired)
+    b_counterfactual = sum((pr - o) ** 2 for _, pr, o, _ in fired) / len(fired)
     hi = [(p0, pr, o) for p0, pr, o, c in fired if c == "high"]
     print(f"\nSUPERVISOR SHADOW A/B ({len(fired)} resolved fired-questions):")
-    print(f"  geo-odds (submitted) Brier: {b0:.4f}")
-    print(f"  supervisor (shadow)  Brier: {b1:.4f}  {'← supervisor BETTER' if b1 < b0 else '← geo-odds better/tied'}")
+    print(f"  geo-odds (submitted)        Brier: {b0:.4f}")
+    print(f"  ship-policy (high-conf only) Brier: {b_policy:.4f}  "
+          f"{'← supervisor policy BETTER' if b_policy < b0 else '← geo-odds better/tied'}")
+    print(f"  diagnostic (always-trust)    Brier: {b_counterfactual:.4f}")
     if hi:
         h0 = sum((p0 - o) ** 2 for p0, _, o in hi) / len(hi)
         h1 = sum((pr - o) ** 2 for _, pr, o in hi) / len(hi)
-        print(f"  high-confidence only ({len(hi)}): geo-odds {h0:.4f} vs supervisor {h1:.4f}")
-    print("  Gate: flip use_supervisor=True only if the supervisor wins on ≥30 fired resolutions.")
+        print(f"  high-confidence overrides ({len(hi)}): geo-odds {h0:.4f} vs supervisor {h1:.4f}")
+    print("  Gate: flip use_supervisor=True only if ship-policy wins on ≥30 fired resolutions.")
 
 
 if __name__ == "__main__":

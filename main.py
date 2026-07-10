@@ -168,6 +168,9 @@ class EdgeForecastBot(ForecastBot):
     supervisor_shadow: bool = False
     supervisor_min_spread: float = 0.15  # only fire when max-min draw spread ≥ this
     SUPERVISOR_LOG = Path("data/supervisor.jsonl")
+    # Stamped into supervisor/draw records so the flywheel never pools pre/post-ensemble
+    # populations into one gate. Bump when the draw composition changes.
+    ENSEMBLE_VERSION = "v1-mono-o4mini"
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -227,22 +230,52 @@ class EdgeForecastBot(ForecastBot):
             return p0  # shadow mode (or supervisor off/failed): submit geo-odds
 
         if isinstance(question, MultipleChoiceQuestion):
-            option_names = [opt.option_name for opt in predictions[0].predicted_options]
+            # Key on the QUESTION's authoritative option list — never draw 0's parse
+            # (a parser hiccup there used to silently drop/mis-name a submitted option).
+            authoritative = list(getattr(question, "options", []) or [])
+            if not authoritative:
+                return await super()._aggregate_predictions(predictions, question)
+            drawn_names = {o.option_name for pl in predictions for o in pl.predicted_options}
+            if drawn_names != set(authoritative):
+                logger.warning(
+                    f"MC option drift on {getattr(question, 'page_url', '')}: "
+                    f"draws={sorted(drawn_names)} vs question={authoritative}"
+                )
             pooled: dict[str, float] = {}
-            for name in option_names:
+            linear: dict[str, float] = {}
+            for name in authoritative:
                 ps = [
                     clamp(opt.probability)
                     for option_list in predictions
                     for opt in option_list.predicted_options
                     if opt.option_name == name
-                ]
+                ] or [0.01]  # option missing from every draw → floor prior
                 o = math.exp(sum(math.log(p / (1.0 - p)) for p in ps) / len(ps))
-                pooled[name] = max(0.01, o / (1.0 + o))  # per-option floor
+                pooled[name] = o / (1.0 + o)
+                linear[name] = sum(ps) / len(ps)
             total = sum(pooled.values()) or 1.0
+            probs = {n: v / total for n, v in pooled.items()}
+            # Water-fill the floor AFTER renormalizing: every option ends >= FLOOR and
+            # the deficit is taken proportionally from above-floor mass, so the final
+            # vector sums to 1 and the SDK validator's clamp is a no-op.
+            FLOOR = 0.01
+            if FLOOR * len(authoritative) < 0.9:
+                for _ in range(10):
+                    deficit = sum(FLOOR - p for p in probs.values() if p < FLOOR)
+                    if deficit <= 1e-12:
+                        break
+                    above = {n: p for n, p in probs.items() if p > FLOOR}
+                    excess = sum(p - FLOOR for p in above.values()) or 1.0
+                    probs = {
+                        n: (FLOOR if p <= FLOOR else p - deficit * (p - FLOOR) / excess)
+                        for n, p in probs.items()
+                    }
+            s = sum(probs.values()) or 1.0
+            probs = {n: p / s for n, p in probs.items()}
+            self._log_mc_pools(question, probs, linear)  # shadow data for geo-vs-linear A/B
             return PredictedOptionList(
                 predicted_options=[
-                    PredictedOption(option_name=name, probability=prob / total)  # renormalize to 1
-                    for name, prob in pooled.items()
+                    PredictedOption(option_name=n, probability=probs[n]) for n in authoritative
                 ]
             )
 
@@ -268,6 +301,8 @@ class EdgeForecastBot(ForecastBot):
             "at": datetime.now(timezone.utc).isoformat(),
             "url": getattr(question, "page_url", None),
             "question_id": getattr(question, "id_of_post", None),
+            "id_of_question": getattr(question, "id_of_question", None),
+            "ensemble": self.ENSEMBLE_VERSION,
             "mode": "live" if self.use_supervisor else "shadow",
             "p0": round(p0, 4),
             "draws": [round(p, 3) for p in draw_ps],
@@ -349,6 +384,26 @@ class EdgeForecastBot(ForecastBot):
         self._log_supervisor(record)
         return p0
 
+    def _log_mc_pools(self, question, geo: dict, linear: dict) -> None:
+        """Shadow log of both MC pooling methods so the geo-vs-linear A/B can run free
+        once MC resolutions accrue. Never crashes a forecast."""
+        try:
+            p = Path("data/mc_pools.jsonl")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            lin_total = sum(linear.values()) or 1.0
+            with p.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "url": getattr(question, "page_url", None),
+                    "question_id": getattr(question, "id_of_post", None),
+                    "id_of_question": getattr(question, "id_of_question", None),
+                    "ensemble": self.ENSEMBLE_VERSION,
+                    "geo": {k: round(v, 4) for k, v in geo.items()},
+                    "linear": {k: round(v / lin_total, 4) for k, v in linear.items()},
+                }, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning(f"mc_pools log failed: {exc}")
+
     def _log_supervisor(self, record: dict) -> None:
         try:
             self.SUPERVISOR_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -360,6 +415,10 @@ class EdgeForecastBot(ForecastBot):
     ##################################### RESEARCH #####################################
 
     async def run_research(self, question: MetaculusQuestion) -> str:
+        # Clean slate: purge any stale draw notes for this question (e.g. from an
+        # earlier failed pass) so the supervisor never reads another attempt's draws.
+        async with self._draw_notes_lock:
+            self._draw_notes.pop(self._question_key(question), None)
         async with self._concurrency_limiter:
             research = ""
             researcher = self.get_llm("researcher")
@@ -642,12 +701,14 @@ class EdgeForecastBot(ForecastBot):
 
             The last thing you write is your final answer as:
             "
-            Percentile 10: XX (lowest number value)
+            Percentile 2.5: XX (a genuinely surprising LOW outcome — the lowest number value)
+            Percentile 10: XX
             Percentile 20: XX
             Percentile 40: XX
             Percentile 60: XX
             Percentile 80: XX
-            Percentile 90: XX (highest number value)
+            Percentile 90: XX
+            Percentile 97.5: XX (a genuinely surprising HIGH outcome — the highest number value)
             "
             """
         )
@@ -736,12 +797,14 @@ class EdgeForecastBot(ForecastBot):
 
             The last thing you write is your final answer as:
             "
-            Percentile 10: YYYY-MM-DD (oldest date)
+            Percentile 2.5: YYYY-MM-DD (a genuinely surprising EARLY date — the oldest)
+            Percentile 10: YYYY-MM-DD
             Percentile 20: YYYY-MM-DD
             Percentile 40: YYYY-MM-DD
             Percentile 60: YYYY-MM-DD
             Percentile 80: YYYY-MM-DD
-            Percentile 90: YYYY-MM-DD (newest date)
+            Percentile 90: YYYY-MM-DD
+            Percentile 97.5: YYYY-MM-DD (a genuinely surprising LATE date — the newest)
             "
             """
         )
