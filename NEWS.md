@@ -1,3 +1,6 @@
+date: 2026-07-10T14:20:13Z
+resolved: 1 (was 0)
+
 87 log lines | 87 unique questions
 fetching 87 posts...
 WARNING: 7 of 87 posts could not be fetched (rate limit/error). Report is INCOMPLETE — resolved.jsonl NOT overwritten; re-run.
