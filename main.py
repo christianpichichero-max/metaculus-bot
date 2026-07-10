@@ -1,5 +1,7 @@
 import argparse
 import asyncio
+import contextvars
+import itertools
 import json
 import logging
 import math
@@ -7,6 +9,12 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Which ensemble slot the CURRENT draw-task should use. Each of the 5 concurrent
+# draw coroutines runs as its own asyncio Task with a COPY of the context, so a
+# value set inside _make_prediction is invisible to sibling draws — this is the
+# race-free alternative to mutating self._llms["default"].
+_DRAW_PURPOSE: contextvars.ContextVar = contextvars.ContextVar("edge_draw_purpose", default=None)
 from typing import Literal
 
 import dotenv
@@ -50,6 +58,70 @@ from forecasting_tools import (
 
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
+
+# ── Quant data-source helpers (requests-only; no new deps) ───────────────────
+_QUANT_TICKER_RE = re.compile(r"\((?:NYSE|NASDAQ|Nasdaq|AMEX|OTC)\s*:\s*([A-Z][A-Z.\-]{0,5})\)")
+_QUANT_YAHOO = {
+    "bitcoin": "BTC-USD", "btc": "BTC-USD", "ethereum": "ETH-USD", "eth": "ETH-USD",
+    "solana": "SOL-USD", "dogecoin": "DOGE-USD",
+    "s&p 500": "^GSPC", "s&p500": "^GSPC", "nasdaq composite": "^IXIC",
+    "nasdaq-100": "^NDX", "dow jones": "^DJI", "kospi": "^KS11", "nikkei": "^N225",
+    "vix": "^VIX", "ftse 100": "^FTSE", "dax": "^GDAXI",
+    "sk hynix": "000660.KS", "samsung electronics": "005930.KS", "tsmc": "TSM",
+}
+_QUANT_FRED = {
+    "federal funds effective rate": "EFFR", "unemployment rate": "UNRATE",
+    "10-year treasury": "DGS10", "30-year fixed rate mortgage": "MORTGAGE30US",
+    "wti crude": "DCOILWTICO", "brent crude": "DCOILBRENTEU",
+    "strategic petroleum reserve": "WCSSTUS1", "initial jobless claims": "ICSA",
+}
+
+
+def _fetch_series_sync(symbol: str, source: str) -> list[float] | None:
+    """Fetch ~3 months of daily closes. Yahoo v8 chart JSON with a Stooq CSV fallback
+    for plain US tickers; FRED via the keyless fredgraph.csv endpoint."""
+    import requests as _rq
+    ua = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
+    try:
+        if source == "fred":
+            r = _rq.get(f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={symbol}", headers=ua, timeout=15)
+            if r.status_code != 200:
+                return None
+            vals = []
+            for row in r.text.splitlines()[1:]:
+                parts = row.split(",")
+                if len(parts) >= 2 and parts[1] not in (".", ""):
+                    try:
+                        vals.append(float(parts[1]))
+                    except ValueError:
+                        pass
+            return vals[-90:] or None
+        r = _rq.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=3mo&interval=1d",
+            headers=ua, timeout=15,
+        )
+        if r.status_code == 200:
+            res = (r.json().get("chart", {}).get("result") or [None])[0] or {}
+            closes = ((res.get("indicators", {}).get("quote") or [{}])[0].get("close")) or []
+            closes = [c for c in closes if isinstance(c, (int, float))]
+            if len(closes) >= 6:
+                return closes
+        # Stooq fallback (plain US tickers only; symbol needs the .us suffix)
+        if re.fullmatch(r"[A-Z][A-Z.\-]{0,5}", symbol) and not symbol.startswith("^"):
+            r = _rq.get(f"https://stooq.com/q/d/l/?s={symbol.lower()}.us&i=d", headers=ua, timeout=15)
+            if r.status_code == 200 and r.text.lower().startswith("date"):
+                closes = []
+                for row in r.text.splitlines()[1:]:
+                    parts = row.split(",")
+                    if len(parts) >= 5:
+                        try:
+                            closes.append(float(parts[4]))
+                        except ValueError:
+                            pass
+                return closes[-90:] or None
+    except Exception:
+        return None
+    return None
 
 
 class EdgeForecastBot(ForecastBot):
@@ -164,6 +236,11 @@ class EdgeForecastBot(ForecastBot):
     #   community-proxy benchmark can't score us — shadow mode makes the tournament
     #   itself the A/B: resolve.py compares Brier(supervisor) vs Brier(geo-odds) on
     #   our own resolved questions, leakage-free.
+    # Quant data researcher: for data-series numeric questions (stock closes, indices,
+    # FRED macro series), fetch the REAL series and inject latest value + realized-vol
+    # band — kills stale/hallucinated anchors on exactly the questions that resolve
+    # from these sources. Detection is conservative (curated maps); unknowns skip.
+    use_quant_data: bool = True
     use_supervisor: bool = False
     supervisor_shadow: bool = False
     supervisor_min_spread: float = 0.15  # only fire when max-min draw spread ≥ this
@@ -178,25 +255,94 @@ class EdgeForecastBot(ForecastBot):
         # bot pairs in the Benchmarker don't cross-contaminate).
         self._draw_notes: dict[str, list[dict]] = {}
         self._draw_notes_lock = asyncio.Lock()
+        # Multi-family ensemble: llms dict entries named draw_0..draw_N define the
+        # per-draw model rotation; absent → every draw uses "default" (mono-model).
+        self.ensemble_purposes = sorted(
+            p for p in getattr(self, "_llms", {}) if str(p).startswith("draw_")
+        )
+        self._draw_counters: dict[str, itertools.count] = {}
+        if self.ensemble_purposes:
+            self.ENSEMBLE_VERSION = "v2-multifamily-2026-07"
+
+    def get_llm(self, purpose: str = "default", guarantee_type=None):
+        """Route 'default' to the current draw's ensemble slot when one is active.
+        All non-draw work (researcher, base-rate pass, supervisor judge, parser)
+        runs outside draw tasks, where the ContextVar is unset."""
+        if purpose == "default":
+            slot = _DRAW_PURPOSE.get()
+            if slot is not None and slot in getattr(self, "_llms", {}):
+                purpose = slot
+        return super().get_llm(purpose, guarantee_type)
 
     @staticmethod
     def _question_key(question: MetaculusQuestion) -> str:
+        # id_of_question first: group subquestions share one post (page_url/id_of_post),
+        # so keying on the post would cross-contaminate their supervisor draw notes.
+        sub = getattr(question, "id_of_question", None)
+        if sub is not None:
+            return str(sub)
         return getattr(question, "page_url", "") or str(getattr(question, "id_of_post", id(question)))
 
     async def _make_prediction(self, question, research):
-        """Record each binary draw's probability + rationale so the supervisor can
-        read WHERE the draws disagree (the framework only hands values to the
-        aggregator, not reasonings)."""
-        reasoned = await super()._make_prediction(question, research)
+        """Per-draw ensemble slot assignment + draw bookkeeping. Records each binary
+        draw's probability/rationale/model so the supervisor can read WHERE the draws
+        disagree, and appends every draw to data/draws.jsonl (the accuracy-by-model
+        ledger that will later prune weak ensemble members)."""
+        slot = None
+        model_name = None
+        token = None
+        if self.ensemble_purposes:
+            key = self._question_key(question)
+            counter = self._draw_counters.setdefault(key, itertools.count())
+            slot = self.ensemble_purposes[next(counter) % len(self.ensemble_purposes)]
+            token = _DRAW_PURPOSE.set(slot)
+        try:
+            reasoned = await super()._make_prediction(question, research)
+        finally:
+            if token is not None:
+                _DRAW_PURPOSE.reset(token)
+        try:
+            llm = self._llms.get(slot) if slot else self._llms.get("default")
+            model_name = getattr(llm, "model", None) or str(llm)
+        except Exception:
+            pass
         try:
             if isinstance(question, BinaryQuestion) and isinstance(reasoned.prediction_value, float):
                 async with self._draw_notes_lock:
                     self._draw_notes.setdefault(self._question_key(question), []).append(
-                        {"p": reasoned.prediction_value, "reasoning": str(reasoned.reasoning or "")[:600]}
+                        {
+                            "p": reasoned.prediction_value,
+                            "model": model_name,
+                            "reasoning": str(reasoned.reasoning or "")[:600],
+                        }
                     )
+            self._log_draw(question, slot, model_name, reasoned)
         except Exception:  # bookkeeping must never break a forecast
             pass
         return reasoned
+
+    def _log_draw(self, question, slot, model_name, reasoned) -> None:
+        """Append one line per draw to the model-accuracy ledger."""
+        try:
+            val = reasoned.prediction_value
+            p = float(val) if isinstance(val, (int, float)) else None
+            entry = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "url": getattr(question, "page_url", None),
+                "question_id": getattr(question, "id_of_post", None),
+                "id_of_question": getattr(question, "id_of_question", None),
+                "question_type": type(question).__name__,
+                "draw": slot or "default",
+                "model": model_name,
+                "ensemble": self.ENSEMBLE_VERSION,
+                "p": p,
+            }
+            path = Path("data/draws.jsonl")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logger.warning(f"draw ledger write failed: {exc}")
 
     async def _aggregate_predictions(self, predictions, question):
         """Geometric mean of odds for binary + multiple-choice; SDK default
@@ -316,7 +462,7 @@ class EdgeForecastBot(ForecastBot):
 
         record["fired"] = True
         gists = "\n".join(
-            f"- Draw {i + 1} said {n['p']:.0%}: {n['reasoning'][:350]}"
+            f"- Draw {i + 1} ({n.get('model') or 'model?'}) said {n['p']:.0%}: {n['reasoning'][:350]}"
             for i, n in enumerate(notes)
         ) or "\n".join(f"- Draw {i + 1} said {p:.0%}" for i, p in enumerate(draw_ps))
 
@@ -468,7 +614,90 @@ class EdgeForecastBot(ForecastBot):
 
             if self.use_base_rate_research:
                 research = await self._add_base_rate_research(question, research)
+            if self.use_quant_data:
+                research = await self._add_quant_data_research(question, research)
             logger.info(f"Found Research for URL {question.page_url}:\n{research}")
+            return research
+
+    def _detect_series(self, question) -> tuple[str, str] | tuple[None, None]:
+        text = f"{question.question_text or ''}".lower()
+        m = _QUANT_TICKER_RE.search(question.question_text or "")
+        if m:
+            return m.group(1), "yahoo"
+        for phrase, sym in _QUANT_YAHOO.items():
+            if phrase in text:
+                return sym, "yahoo"
+        for phrase, sym in _QUANT_FRED.items():
+            if phrase in text:
+                return sym, "fred"
+        return None, None
+
+    async def _add_quant_data_research(self, question, research: str) -> str:
+        """Fetch → validate → inject real series data for data-driven numeric
+        questions. NEVER breaks a forecast: any failure returns research unchanged."""
+        try:
+            if not isinstance(question, NumericQuestion):
+                return research
+            symbol, source = self._detect_series(question)
+            if not symbol:
+                return research
+            closes = await asyncio.wait_for(
+                asyncio.to_thread(_fetch_series_sync, symbol, source), timeout=20
+            )
+            if not closes or len(closes) < 6:
+                return research
+            latest = closes[-1]
+            # Anti-wrong-series/unit gate: latest must be near the question's bounds.
+            lb = getattr(question, "lower_bound", None)
+            ub = getattr(question, "upper_bound", None)
+            if isinstance(lb, (int, float)) and isinstance(ub, (int, float)) and ub > lb:
+                rng = ub - lb
+                lo_gate = lb - rng
+                if lb > 0:
+                    # relative floor catches wrong-scale/wrong-unit series (e.g. a
+                    # ~100 series against a 100k-200k question) that the absolute
+                    # range gate misses when lb - rng <= 0.
+                    lo_gate = max(lo_gate, lb * 0.5)
+                if not (lo_gate <= latest <= ub + rng):
+                    logger.warning(
+                        f"quant-data: {symbol} latest {latest} far outside bounds "
+                        f"[{lb},{ub}] — dropping (wrong series/unit?)"
+                    )
+                    return research
+            rets = [
+                math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0
+            ][-60:]
+            if len(rets) < 5:
+                return research
+            mean_r = sum(rets) / len(rets)
+            sigma_d = math.sqrt(sum((r - mean_r) ** 2 for r in rets) / max(1, len(rets) - 1))
+            # Horizon: days until the question closes (default ~7).
+            h = 7.0
+            close_t = getattr(question, "scheduled_close_time", None)
+            try:
+                if close_t is not None:
+                    h = max(1.0, (close_t - datetime.now(timezone.utc)).total_seconds() / 86400.0)
+            except Exception:
+                pass
+            sigma_h = sigma_d * math.sqrt(h)
+            band_lo = latest * math.exp(-1.282 * sigma_h)
+            band_hi = latest * math.exp(1.282 * sigma_h)
+            chg20 = (closes[-1] / closes[-21] - 1.0) * 100 if len(closes) >= 21 else None
+            section = clean_indents(
+                f"""
+                ## Market/series data (fetched {datetime.now().strftime("%Y-%m-%d")}, {source} {symbol})
+                - Latest value: {latest:,.4g}
+                - Last 5 closes: {", ".join(f"{c:,.4g}" for c in closes[-5:])}
+                - 20-period change: {f"{chg20:+.1f}%" if chg20 is not None else "n/a"}
+                - Realized daily vol: {sigma_d:.4f} (log-returns); horizon ≈ {h:.0f} days
+                - Naive random-walk band for the horizon: P10 ≈ {band_lo:,.4g}, P50 ≈ {latest:,.4g}, P90 ≈ {band_hi:,.4g}
+                - Anchor your distribution on the LATEST value and this band unless the
+                  research gives a concrete reason to shift; widen (never narrow) beyond it.
+                """
+            )
+            return f"{section}\n\n{research}"
+        except Exception as exc:
+            logger.warning(f"quant-data research failed ({exc}); continuing without it")
             return research
 
     async def _add_base_rate_research(
@@ -994,13 +1223,20 @@ def _select_llms():
         os.getenv(k)
         for k in ("PERPLEXITY_API_KEY", "OPENROUTER_API_KEY", "EXA_API_KEY", "OPENAI_API_KEY")
     )
-    # OpenRouter (free tournament credits): pin the high-EV free config — a REASONING
-    # model as the forecaster (AIB's #1 finding: "model > scaffolding") + gpt-4o-search-
-    # preview for LIVE web research + cheap gpt-4o-mini for the mechanical steps. All
-    # verified working on this key. (o4-mini is an o-series model → temperature MUST be 1.)
+    # OpenRouter (free tournament credits): reasoning workhorse + LIVE web research +
+    # cheap mechanical steps, PLUS the multi-family draw rotation (draw_0..draw_4).
+    # Diverse families cancel each family's systematic bias — every paid AIB winner
+    # mixes families (Q2 winner: Sonnet x2 / o4-mini x2 / o3 x1). All models verified
+    # working on this key. o-series REQUIRE temperature=1. NOTE the slug difference:
+    # OpenRouter uses claude-sonnet-4.6 (dot), direct Anthropic uses -4-6 (dash).
     if os.getenv("OPENROUTER_API_KEY"):
         return {
             "default": GeneralLlm(model="openrouter/openai/o4-mini", temperature=1, timeout=120),
+            "draw_0": GeneralLlm(model="openrouter/openai/o4-mini", temperature=1, timeout=120),
+            "draw_1": GeneralLlm(model="openrouter/openai/o4-mini", temperature=1, timeout=120),
+            "draw_2": GeneralLlm(model="openrouter/anthropic/claude-sonnet-4.6", temperature=1, timeout=120),
+            "draw_3": GeneralLlm(model="openrouter/anthropic/claude-sonnet-4.6", temperature=1, timeout=120),
+            "draw_4": GeneralLlm(model="openrouter/openai/o3", temperature=1, timeout=180),
             "researcher": GeneralLlm(model="openrouter/openai/gpt-4o-search-preview", temperature=0.1, timeout=90),
             "summarizer": GeneralLlm(model="openrouter/openai/gpt-4o-mini", temperature=0.3),
             "parser": GeneralLlm(model="openrouter/openai/gpt-4o-mini", temperature=0.3),
