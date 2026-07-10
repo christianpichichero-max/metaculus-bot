@@ -1,9 +1,9 @@
 name: Forecast on Metaculus Cup
 
+# Manual-only: the Cup pays no prize, and its cron would re-forecast every open cup
+# question (~13 LLM calls each) against the same grant funding the real tournament.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 */2 * *" # midnight UTC every 2 days
 
 concurrency:
   group: ${{ github.workflow }}

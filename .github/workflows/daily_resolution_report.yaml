@@ -33,16 +33,54 @@ jobs:
           mkdir -p data
           git show origin/data:forecasts.jsonl > data/forecasts.jsonl 2>/dev/null || true
           git show origin/data:supervisor.jsonl > data/supervisor.jsonl 2>/dev/null || true
-      - name: Run resolution + shadow-A/B report
-        env:
-          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
-        run: |
-          python resolve.py | tee report.txt
-      - name: Publish report (and raise the news flag on first/new resolutions)
+          git show origin/data:failed.jsonl > data/failed.jsonl 2>/dev/null || true
+      # DEAD-MAN SWITCH: the bot's failures are 'green' (per-question exceptions are
+      # swallowed by design), so watch the heartbeat instead: if no NEW forecast has
+      # been logged in >= 30h, something upstream is dead (credits, token, SDK).
+      - name: Dead-man switch (stale-forecast alarm)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
+          set +e
+          [ -s data/forecasts.jsonl ] || { echo "no log yet — skip"; exit 0; }
+          AGE_H=$(python - <<'PY'
+          import json, datetime
+          latest = None
+          for line in open('data/forecasts.jsonl'):
+              try:
+                  t = json.loads(line).get('logged_at')
+                  if t: latest = max(latest or t, t)
+              except Exception: pass
+          if latest is None:
+              print(9999)
+          else:
+              dt = datetime.datetime.fromisoformat(latest.replace('Z','+00:00'))
+              print(round((datetime.datetime.now(datetime.timezone.utc)-dt).total_seconds()/3600))
+          PY
+          )
+          echo "hours since last logged forecast: $AGE_H"
+          if [ "$AGE_H" -ge 30 ]; then
+            if [ -z "$(gh issue list --state open --search 'DEAD-MAN in:title' --json number -q '.[0]' 2>/dev/null)" ]; then
+              gh issue create --repo "$GITHUB_REPOSITORY" \
+                --title "DEAD-MAN: no new forecast logged in ${AGE_H}h" \
+                --body "@christianpichichero-max the bot has not logged a new forecast in ${AGE_H} hours. Likely causes: OpenRouter credits exhausted, Metaculus token expired, SDK breakage, or simply no open questions for an extended stretch. Check the Actions runs: https://github.com/${GITHUB_REPOSITORY}/actions" \
+                || echo "dead-man issue creation failed (non-fatal)"
+            else
+              echo "dead-man issue already open — not duplicating"
+            fi
+          fi
+      - name: Run resolution + shadow-A/B report
+        shell: bash
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+        run: |
+          set -o pipefail
+          python resolve.py | tee report.txt || echo "::warning::resolve.py reported incomplete/failed fetches — report may under-count"
+      - name: Publish report (push FIRST, then raise the news issue)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
           COUNT=$(grep -oE "RESOLVED binary: [0-9]+" report.txt | grep -oE "[0-9]+" | head -1 || true)
           COUNT=${COUNT:-0}
           LAST=$(git show origin/data:last_reported_count 2>/dev/null || echo 0)
@@ -50,14 +88,25 @@ jobs:
           REPO="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git config --global user.email "bot@users.noreply.github.com"
           git config --global user.name "chrispbacon-bot"
-          D="$(mktemp -d)"
-          git clone --quiet --depth 1 --branch data "$REPO" "$D"
-          cp report.txt "$D/report.txt"
-          [ -f data/resolved.jsonl ] && cp data/resolved.jsonl "$D/resolved.jsonl"
-          if [ "$COUNT" -gt "$LAST" ]; then
-            echo "$COUNT" > "$D/last_reported_count"
-            { printf 'date: %s\nresolved: %s (was %s)\n\n' "$(date -u +%FT%TZ)" "$COUNT" "$LAST"; cat report.txt; } > "$D/NEWS.md"
+          PUSHED=0
+          for attempt in 1 2 3; do
+            D="$(mktemp -d)"
+            git clone --quiet --depth 1 --branch data "$REPO" "$D" || { sleep $((attempt*5)); continue; }
+            cp report.txt "$D/report.txt"
+            [ -f data/resolved.jsonl ] && cp data/resolved.jsonl "$D/resolved.jsonl"
+            if [ "$COUNT" -gt "$LAST" ]; then
+              echo "$COUNT" > "$D/last_reported_count"
+              { printf 'date: %s\nresolved: %s (was %s)\n\n' "$(date -u +%FT%TZ)" "$COUNT" "$LAST"; cat report.txt; } > "$D/NEWS.md"
+            fi
+            if ( cd "$D" && git add -A && git commit --quiet -m "daily report $(date -u +%FT%TZ)" && git push --quiet origin data ); then
+              PUSHED=1; echo "report pushed (attempt $attempt)"; break
+            fi
+            echo "push rejected (attempt $attempt) — re-cloning..."; sleep $((attempt*5))
+          done
+          # Issue ONLY after a successful push: otherwise last_reported_count is lost
+          # and tomorrow's run would mint a duplicate news issue.
+          if [ "$PUSHED" = "1" ] && [ "$COUNT" -gt "$LAST" ]; then
             { printf '@christianpichichero-max new resolutions just landed. Report:\n\n```\n'; cat report.txt; printf '```\n\nLeaderboard: https://www.metaculus.com/tournament/summer-futureeval-2026/\nProfile: https://www.metaculus.com/accounts/profile/303904/\n'; } > /tmp/issue_body.md
             gh issue create --repo "$GITHUB_REPOSITORY" --title "Chrispbacon-bot: $COUNT resolved question(s) - new scores are in" --body-file /tmp/issue_body.md || echo "issue creation failed (non-fatal)"
           fi
-          ( cd "$D" && git add -A && git commit --quiet -m "daily report $(date -u +%FT%TZ)" && git push --quiet origin data ) || echo "nothing to commit"
+          [ "$PUSHED" = "1" ] || echo "::warning::report push FAILED after 3 attempts"

@@ -980,6 +980,22 @@ async def _forecast_with_coverage_retry(bot, tournament_id):
         )
         retry = await bot.forecast_on_tournament(tournament_id, return_exceptions=True)
         reports = [r for r in reports if not isinstance(r, BaseException)] + retry
+        # Record questions that failed BOTH passes so the daily dead-man check can
+        # flag a deterministically-failing question (never crash on bookkeeping).
+        try:
+            still_failed = [r for r in retry if isinstance(r, BaseException)]
+            if still_failed:
+                p = Path("data/failed.jsonl")
+                p.parent.mkdir(parents=True, exist_ok=True)
+                with p.open("a", encoding="utf-8") as f:
+                    for exc in still_failed:
+                        f.write(json.dumps({
+                            "at": datetime.now(timezone.utc).isoformat(),
+                            "tournament": str(tournament_id),
+                            "error": str(exc)[:300],
+                        }) + "\n")
+        except Exception as exc:
+            logger.warning(f"failed.jsonl bookkeeping failed: {exc}")
     return reports
 
 
@@ -1034,47 +1050,62 @@ if __name__ == "__main__":
     # exceptions, since return_exceptions=True) which then flows into the
     # summary printers below.
     client = MetaculusClient()
+
+    def _run_and_log(coro, label: str):
+        """Run one tournament block and log its forecasts IMMEDIATELY.
+        Flywheel-safety invariants: (a) a crash in a later block (e.g. minibench
+        fetch) can never destroy an earlier block's already-earned forecast log;
+        (b) exceptions inside the report list never block logging (log_forecasts
+        skips them safely)."""
+        try:
+            reports = asyncio.run(coro)
+        except Exception as exc:  # fetch-level failure, outside return_exceptions
+            logger.error(f"{label}: tournament run failed before forecasting: {exc}")
+            return []
+        log_forecasts(reports)
+        return reports
+
     if run_mode == "tournament":
-        seasonal_tournament_reports = asyncio.run(
-            _forecast_with_coverage_retry(bot, client.CURRENT_AI_COMPETITION_ID)
+        forecast_reports = _run_and_log(
+            _forecast_with_coverage_retry(bot, client.CURRENT_AI_COMPETITION_ID), "seasonal"
+        ) + _run_and_log(
+            _forecast_with_coverage_retry(bot, client.CURRENT_MINIBENCH_ID), "minibench"
         )
-        minibench_reports = asyncio.run(
-            _forecast_with_coverage_retry(bot, client.CURRENT_MINIBENCH_ID)
-        )
-        forecast_reports = seasonal_tournament_reports + minibench_reports
     elif run_mode == "minibench":
         # MiniBench only — the bi-weekly ~$1k / ~60-question rounds. Cheapest lane
         # and fastest scored feedback (every ~2 weeks vs a 4-month season).
-        forecast_reports = asyncio.run(
-            _forecast_with_coverage_retry(bot, client.CURRENT_MINIBENCH_ID)
+        forecast_reports = _run_and_log(
+            _forecast_with_coverage_retry(bot, client.CURRENT_MINIBENCH_ID), "minibench"
         )
     elif run_mode == "metaculus_cup":
-        # The Metaculus Cup may be uninitialized near the start of a season
-        # (Jan/May/Sep). AXC_2025_TOURNAMENT_ID = 32564 and
-        # AI_2027_TOURNAMENT_ID = "ai-2027" are also valid targets here.
-        bot.skip_previously_forecasted_questions = False
-        forecast_reports = asyncio.run(
-            bot.forecast_on_tournament(
-                client.CURRENT_METACULUS_CUP_ID, return_exceptions=True
-            )
+        # Non-prize practice tournament: never re-forecast (each re-forecast costs
+        # ~13 LLM calls/question against the same grant funding the real tournament).
+        forecast_reports = _run_and_log(
+            bot.forecast_on_tournament(client.CURRENT_METACULUS_CUP_ID, return_exceptions=True),
+            "metaculus_cup",
         )
     elif run_mode == "test_questions":
         # The bot-testing-area tournament contains all question types and is
         # the recommended target for smoke-testing your bot.
         # https://www.metaculus.com/tournament/bot-testing-area/
         bot.skip_previously_forecasted_questions = False
-        forecast_reports = asyncio.run(
-            bot.forecast_on_tournament(
-                "bot-testing-area", return_exceptions=True
-            )
+        forecast_reports = _run_and_log(
+            bot.forecast_on_tournament("bot-testing-area", return_exceptions=True),
+            "test_questions",
         )
 
-    bot.log_report_summary(forecast_reports)
-    # Instrument everything: append every forecast to data/forecasts.jsonl for
-    # calibration review and prompt/model iteration between cycles.
-    log_forecasts(forecast_reports)
-    print_run_summary_banner(
-        forecast_reports,
-        will_publish=publish_to_metaculus,
-        tournament_url=TOURNAMENT_URLS.get(run_mode),
-    )
+    # raise_errors=False: per-question failures are already retried + surfaced in the
+    # summary text; raising here previously WIPED the run's log (logged after) and
+    # crash-looped the workflow every 20 minutes on one deterministic bad question.
+    try:
+        bot.log_report_summary(forecast_reports, raise_errors=False)
+    except Exception as exc:
+        logger.warning(f"log_report_summary failed (non-fatal): {exc}")
+    try:
+        print_run_summary_banner(
+            forecast_reports,
+            will_publish=publish_to_metaculus,
+            tournament_url=TOURNAMENT_URLS.get(run_mode),
+        )
+    except Exception as exc:
+        logger.warning(f"summary banner failed (non-fatal): {exc}")

@@ -1,10 +1,12 @@
-# Metaculus forecasting bot — pinned to the same set the official template uses,
-# but managed with pip + venv (matching the polymarket-bot workflow) instead of Poetry.
-# forecasting-tools pulls in its own tree (litellm, openai, anthropic, pydantic, ...).
-forecasting-tools>=0.2.90
-openai>=2.0.0
-asknews>=0.13.11
-numpy>=2.3.0
-requests>=2.32.3
-python-dotenv>=1.0.1
-python-decouple>=3.8
+# PINNED — CI reinstalls fresh every 20 minutes, and the bot overrides private SDK
+# internals (_make_prediction, _aggregate_predictions), so a floating upstream release
+# could silently drop geo-odds/supervisor behavior mid-tournament. Bump deliberately:
+# test locally (pytest + --mode test_questions), then update the pin. Season rollover
+# (CURRENT_*_ID constants) is an explicit, tested bump per CLAUDE.md.
+forecasting-tools==0.2.92
+openai==2.43.0
+asknews==0.13.51
+numpy==2.4.6
+requests==2.34.2
+python-dotenv==1.2.2
+python-decouple==3.8

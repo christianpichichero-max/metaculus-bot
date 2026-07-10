@@ -40,36 +40,53 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
-      # THE CALIBRATION FLYWHEEL: append this run's forecasts to the durable 'data'
-      # branch so the private track record accumulates across runs (the one real edge).
-      # A fresh checkout means data/forecasts.jsonl holds ONLY this run's new forecasts
-      # (skip_previously_forecasted dedupes), so a plain append never duplicates.
-      - name: Persist forecast log to 'data' branch
+      # THE CALIBRATION FLYWHEEL: append this run's logs to the durable 'data' branch
+      # (the one real edge). Per-file loop: an empty forecasts.jsonl must NOT skip a
+      # non-empty supervisor.jsonl. Push retries with a fresh clone handle races with
+      # the daily-report workflow pushing the same branch.
+      - name: Persist run logs to 'data' branch
         if: always()
         run: |
           set +e
-          if [ ! -s data/forecasts.jsonl ]; then echo "no new forecasts this run — nothing to persist"; exit 0; fi
+          FILES="forecasts.jsonl supervisor.jsonl draws.jsonl failed.jsonl"
+          ANY=0
+          for f in $FILES; do [ -s "data/$f" ] && ANY=1; done
+          if [ "$ANY" = "0" ]; then echo "no new log lines this run — nothing to persist"; exit 0; fi
           REPO="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
           git config --global user.email "bot@users.noreply.github.com"
           git config --global user.name "chrispbacon-bot"
-          D="$(mktemp -d)"
-          if git clone --quiet --depth 1 --branch data "$REPO" "$D" 2>/dev/null; then
-            cat data/forecasts.jsonl >> "$D/forecasts.jsonl"
-            [ -s data/supervisor.jsonl ] && cat data/supervisor.jsonl >> "$D/supervisor.jsonl"
-            ( cd "$D" && git add -A && git commit --quiet -m "forecasts $(date -u +%FT%TZ)" && git push --quiet origin data ) \
-              && echo "appended to existing data branch"
-          else
-            cd "$D"
-            git init --quiet && git checkout --quiet -b data
-            cp "$GITHUB_WORKSPACE/data/forecasts.jsonl" forecasts.jsonl
-            git add forecasts.jsonl && git commit --quiet -m "init forecast log $(date -u +%FT%TZ)"
-            git push --quiet "$REPO" data && echo "created data branch"
-          fi
-      # Belt-and-suspenders: also keep the per-run artifact.
-      - name: Upload forecast log artifact
+          for attempt in 1 2 3; do
+            D="$(mktemp -d)"
+            if git clone --quiet --depth 1 --branch data "$REPO" "$D" 2>/dev/null; then
+              for f in $FILES; do
+                [ -s "data/$f" ] && cat "data/$f" >> "$D/$f"
+              done
+              if ( cd "$D" && git add -A && git commit --quiet -m "run logs $(date -u +%FT%TZ)" && git push --quiet origin data ); then
+                echo "appended to data branch (attempt $attempt)"; exit 0
+              fi
+              echo "push rejected (attempt $attempt) — likely concurrent writer; re-cloning..."
+              sleep $((attempt * 5))
+            else
+              cd "$D"
+              git init --quiet && git checkout --quiet -b data
+              for f in $FILES; do
+                [ -s "$GITHUB_WORKSPACE/data/$f" ] && cp "$GITHUB_WORKSPACE/data/$f" "$f"
+              done
+              git add -A && git commit --quiet -m "init logs $(date -u +%FT%TZ)"
+              git push --quiet "$REPO" data && { echo "created data branch"; exit 0; }
+              sleep $((attempt * 5))
+            fi
+          done
+          echo "::warning::data-branch persist FAILED after 3 attempts — logs only in artifact"
+      # Belt-and-suspenders: also keep the per-run artifact (all logs).
+      - name: Upload run log artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: forecasts-${{ github.run_id }}
-          path: data/forecasts.jsonl
+          path: |
+            data/forecasts.jsonl
+            data/supervisor.jsonl
+            data/draws.jsonl
+            data/failed.jsonl
           if-no-files-found: ignore
