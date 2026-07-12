@@ -1,20 +1,21 @@
-date: 2026-07-11T13:15:14Z
-resolved: 11 (was 1)
+date: 2026-07-12T13:17:00Z
+resolved: 14 (was 11)
 
-93 log lines | 93 unique questions
-fetching 93 posts...
-WARNING: 10 of 93 posts could not be fetched (rate limit/error). Report is INCOMPLETE — resolved.jsonl NOT overwritten; re-run.
+96 log lines | 96 unique questions
+fetching 96 posts...
+WARNING: 9 of 96 posts could not be fetched (rate limit/error). Report is INCOMPLETE — resolved.jsonl NOT overwritten; re-run.
 
-RESOLVED binary: 11 | Brier 0.2164 (lower=better, 0.25=coinflip) | LogLoss 0.6797
+RESOLVED binary: 14 | Brier 0.3137 (lower=better, 0.25=coinflip) | LogLoss 0.9755
 
 Reliability (predicted bucket vs actual yes-rate):
-   0- 10% | n=  3 | actual 33%
-  10- 20% | n=  1 | actual 100%
-  20- 30% | n=  3 | actual 0%
+   0- 10% | n=  5 | actual 40%
+  10- 20% | n=  2 | actual 100%
+  20- 30% | n=  2 | actual 0%
   30- 40% | n=  2 | actual 0%
   50- 60% | n=  1 | actual 0%
+  60- 70% | n=  1 | actual 0%
   90-100% | n=  1 | actual 100%
 
-OFFICIAL scores captured on 24 question(s): SPOT PEER total = -79.31 (prize share ∝ max(0, total)²)
+OFFICIAL scores captured on 26 question(s): SPOT PEER total = -420.09 (prize share ∝ max(0, total)²)
 
 Supervisor shadow A/B: no resolved fired-questions yet — still accruing.
