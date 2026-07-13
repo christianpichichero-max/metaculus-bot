@@ -48,7 +48,7 @@ jobs:
         if: always()
         run: |
           set +e
-          FILES="forecasts.jsonl supervisor.jsonl draws.jsonl failed.jsonl mc_pools.jsonl blf.jsonl"
+          FILES="forecasts.jsonl supervisor.jsonl draws.jsonl failed.jsonl mc_pools.jsonl blf.jsonl calib.jsonl"
           ANY=0
           for f in $FILES; do [ -s "data/$f" ] && ANY=1; done
           if [ "$ANY" = "0" ]; then echo "no new log lines this run — nothing to persist"; exit 0; fi
@@ -91,4 +91,5 @@ jobs:
             data/failed.jsonl
             data/mc_pools.jsonl
             data/blf.jsonl
+            data/calib.jsonl
           if-no-files-found: ignore

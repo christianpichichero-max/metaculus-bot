@@ -184,18 +184,33 @@ def main() -> None:
             except Exception:
                 pass
 
-    # Fetch each POST once (group subquestions share a post).
+    # Fetch each POST once (group subquestions share a post). Two passes: the log is
+    # now 100+ questions and even paced loops trip rate limits mid-run — a cooldown +
+    # second sweep of the failures recovers them instead of reporting incomplete.
     post_ids = sorted({qid for qid, _ in by_key})
     print(f"fetching {len(post_ids)} posts...")
     posts: dict = {}
-    failures = 0
+    failed_ids = []
     for pid in post_ids:
         ok, pj = _fetch_post(pid)
         if not ok:
-            failures += 1
+            failed_ids.append(pid)
         else:
             posts[pid] = pj
-        time.sleep(0.35)  # be gentle on the API to avoid rate-limit gaps
+        time.sleep(0.5)  # be gentle on the API to avoid rate-limit gaps
+    if failed_ids:
+        print(f"first pass: {len(failed_ids)} fetch failures — cooling down 30s and retrying those...")
+        time.sleep(30)
+        still = []
+        for pid in failed_ids:
+            ok, pj = _fetch_post(pid)
+            if ok:
+                posts[pid] = pj
+            else:
+                still.append(pid)
+            time.sleep(1.0)
+        failed_ids = still
+    failures = len(failed_ids)
 
     bin_scored = []   # (p, outcome, rec)
     mc_scored = []    # (logscore, brier, rec)

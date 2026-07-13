@@ -222,6 +222,13 @@ class EdgeForecastBot(ForecastBot):
     # on ~850 resolved Metaculus binaries (log score 0.370 vs 0.380 vs 0.392).
     # Unlike the median it keeps information from every draw. Set "sdk_default" to A/B.
     aggregation_method: str = "geo_odds"  # "geo_odds" | "sdk_default"
+    # DATA-JUSTIFIED (2026-07-13, n=27 resolved): the bot is overconfident-NO on
+    # fast-moving events — predictions in the 0-20% zone resolved YES 33-50% of the
+    # time (5 named geopolitical misses cost ~-744 spot-peer). A 0.10 low-side floor
+    # improved Brier .2357→.2284 and LogLoss .7450→.6879 on the resolved set; chosen
+    # over stronger in-sample optima for robustness. Raw vs submitted logged to
+    # data/calib.jsonl so future resolutions keep A/B-ing it (revisit at n≥60).
+    binary_low_floor: float = 0.10  # applied only when the pooled p < 0.5
     # Prepend an explicit outside-view base-rate research section (the Q2 winner's
     # technique). Costs one extra LLM call per question; closes the gap where the
     # news dump lacks base rates so the forecaster would otherwise confabulate them.
@@ -373,16 +380,17 @@ class EdgeForecastBot(ForecastBot):
             log_odds = [math.log(clamp(p) / (1.0 - clamp(p))) for p in predictions]
             o = math.exp(sum(log_odds) / len(log_odds))
             p0 = clamp(o / (1.0 + o))
+            p_final = p0
             if (self.use_supervisor or self.supervisor_shadow) and len(predictions) >= 3:
                 try:
                     p_supervised = await self._supervise_binary(
                         question, [clamp(p) for p in predictions], notes, p0
                     )
                     if self.use_supervisor:  # live: submit the supervised number
-                        return p_supervised
+                        p_final = p_supervised
                 except Exception as exc:
                     logger.warning(f"supervisor failed ({exc}); using geo-odds aggregate")
-            return p0  # shadow mode (or supervisor off/failed): submit geo-odds
+            return self._apply_binary_calibration(question, p_final)
 
         if isinstance(question, MultipleChoiceQuestion):
             # Key on the QUESTION's authoritative option list — never draw 0's parse
@@ -436,6 +444,34 @@ class EdgeForecastBot(ForecastBot):
 
         # numeric / date / conditional → SDK's per-percentile median (don't extremize tails)
         return await super()._aggregate_predictions(predictions, question)
+
+    def _apply_binary_calibration(self, question, p: float) -> float:
+        """Low-side floor for the documented overconfident-NO bias. Every raw→submitted
+        pair is logged so the flywheel keeps scoring the correction on new resolutions
+        (strengthen/weaken/revert at n≥60 based on that data, not this sample)."""
+        p_submitted = p
+        try:
+            if p < 0.5 and self.binary_low_floor > 0:
+                p_submitted = max(p, self.binary_low_floor)
+        except Exception:
+            p_submitted = p
+        try:  # bookkeeping is separate — its failure never cancels the calibration
+            path = Path("data/calib.jsonl")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "url": getattr(question, "page_url", None),
+                    "question_id": getattr(question, "id_of_post", None),
+                    "id_of_question": getattr(question, "id_of_question", None),
+                    "p_raw": round(p, 4),
+                    "p_submitted": round(p_submitted, 4),
+                    "floor": self.binary_low_floor,
+                    "ensemble": self.ENSEMBLE_VERSION,
+                }) + "\n")
+        except Exception as exc:
+            logger.warning(f"calibration bookkeeping failed: {exc}")
+        return p_submitted
 
     ################################## SUPERVISOR ##################################
 
@@ -810,7 +846,7 @@ class EdgeForecastBot(ForecastBot):
                 - Realized daily vol: {sigma_d:.4f} (log-returns); horizon ≈ {h:.0f} days
                 - Naive random-walk band for the horizon: P10 ≈ {band_lo:,.4g}, P50 ≈ {latest:,.4g}, P90 ≈ {band_hi:,.4g}
                 - Anchor your distribution on the LATEST value and this band unless the
-                  research gives a concrete reason to shift; widen (never narrow) beyond it.
+                  research gives a concrete reason to shift or reshape it.
                 """
             )
             return f"{section}\n\n{research}"
@@ -1044,7 +1080,7 @@ class EdgeForecastBot(ForecastBot):
             (f) An unexpected scenario that results in a HIGH outcome.
 
             {self._get_conditional_disclaimer_if_necessary(question)}
-            You remind yourself that good forecasters are humble and set WIDE 90/10 confidence intervals to account for unknown unknowns — under-confident (too-narrow) intervals are punished hard when reality lands in the tail. Concretely: your Percentile-90 minus Percentile-10 spread should be at least as wide as the realized range of this quantity over the past ~5 comparable periods; when unsure, err WIDER.
+            You remind yourself that good forecasters aim for CALIBRATED intervals: the true outcome should land between your Percentile-10 and Percentile-90 about 80% of the time — intervals that are too wide leak points to sharper forecasters on every question, and intervals that are too narrow get punished hard when reality lands in the tail. Use the realized range of this quantity over the past ~5 comparable periods as a sanity reference for your spread, not a floor.
 
             The last thing you write is your final answer as:
             "
@@ -1140,7 +1176,7 @@ class EdgeForecastBot(ForecastBot):
             (f) An unexpected scenario that results in a HIGH outcome.
 
             {self._get_conditional_disclaimer_if_necessary(question)}
-            You remind yourself that good forecasters are humble and set WIDE 90/10 confidence intervals to account for unknown unknowns — under-confident (too-narrow) intervals are punished hard when reality lands in the tail. Concretely: your Percentile-90 minus Percentile-10 spread should be at least as wide as the realized range of this quantity over the past ~5 comparable periods; when unsure, err WIDER.
+            You remind yourself that good forecasters aim for CALIBRATED intervals: the true outcome should land between your Percentile-10 and Percentile-90 about 80% of the time — intervals that are too wide leak points to sharper forecasters on every question, and intervals that are too narrow get punished hard when reality lands in the tail. Use the realized range of this quantity over the past ~5 comparable periods as a sanity reference for your spread, not a floor.
 
             The last thing you write is your final answer as:
             "
