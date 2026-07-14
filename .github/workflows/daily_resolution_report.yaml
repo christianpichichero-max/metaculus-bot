@@ -31,9 +31,9 @@ jobs:
         run: |
           git fetch origin data || { echo "no data branch yet"; exit 0; }
           mkdir -p data
-          git show origin/data:forecasts.jsonl > data/forecasts.jsonl 2>/dev/null || true
-          git show origin/data:supervisor.jsonl > data/supervisor.jsonl 2>/dev/null || true
-          git show origin/data:failed.jsonl > data/failed.jsonl 2>/dev/null || true
+          for f in forecasts.jsonl supervisor.jsonl failed.jsonl forecasts_structured.jsonl blf.jsonl calib.jsonl; do
+            git show "origin/data:$f" > "data/$f" 2>/dev/null || rm -f "data/$f"
+          done
       # DEAD-MAN SWITCH: the bot's failures are 'green' (per-question exceptions are
       # swallowed by design), so watch the heartbeat instead: if no NEW forecast has
       # been logged in >= 30h, something upstream is dead (credits, token, SDK).
