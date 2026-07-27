@@ -278,7 +278,7 @@ class EdgeForecastBot(ForecastBot):
         )
         self._draw_counters: dict[str, itertools.count] = {}
         if self.ensemble_purposes:
-            self.ENSEMBLE_VERSION = "v2-multifamily-2026-07"
+            self.ENSEMBLE_VERSION = "v3-sonnet-o3-weighted-2026-07-27"
 
     def get_llm(self, purpose: str = "default", guarantee_type=None):
         """Route 'default' to the current draw's ensemble slot when one is active.
@@ -1383,14 +1383,19 @@ def _select_llms():
     # mixes families (Q2 winner: Sonnet x2 / o4-mini x2 / o3 x1). All models verified
     # working on this key. o-series REQUIRE temperature=1. NOTE the slug difference:
     # OpenRouter uses claude-sonnet-4.6 (dot), direct Anthropic uses -4-6 (dash).
+    # LEDGER-TUNED ROTATION (2026-07-27, first N≥30-per-member verdict): on 160
+    # resolved draws, sonnet-4.6 Brier 0.1772 (n=64) and o3 0.1808 (n=32) clearly
+    # beat o4-mini 0.2114 (n=64) → o4-mini demoted from 2 seats to 1 (kept for
+    # family diversity), sonnet & o3 promoted to 2 each. Re-evaluate at the next
+    # N≥30 increment per member; ENSEMBLE_VERSION bumped so the flywheel stratifies.
     if os.getenv("OPENROUTER_API_KEY"):
         return {
-            "default": GeneralLlm(model="openrouter/openai/o4-mini", temperature=1, timeout=120),
-            "draw_0": GeneralLlm(model="openrouter/openai/o4-mini", temperature=1, timeout=120),
-            "draw_1": GeneralLlm(model="openrouter/openai/o4-mini", temperature=1, timeout=120),
-            "draw_2": GeneralLlm(model="openrouter/anthropic/claude-sonnet-4.6", temperature=1, timeout=120),
-            "draw_3": GeneralLlm(model="openrouter/anthropic/claude-sonnet-4.6", temperature=1, timeout=120),
-            "draw_4": GeneralLlm(model="openrouter/openai/o3", temperature=1, timeout=180),
+            "default": GeneralLlm(model="openrouter/anthropic/claude-sonnet-4.6", temperature=1, timeout=120),
+            "draw_0": GeneralLlm(model="openrouter/anthropic/claude-sonnet-4.6", temperature=1, timeout=120),
+            "draw_1": GeneralLlm(model="openrouter/anthropic/claude-sonnet-4.6", temperature=1, timeout=120),
+            "draw_2": GeneralLlm(model="openrouter/openai/o3", temperature=1, timeout=180),
+            "draw_3": GeneralLlm(model="openrouter/openai/o3", temperature=1, timeout=180),
+            "draw_4": GeneralLlm(model="openrouter/openai/o4-mini", temperature=1, timeout=120),
             "researcher": GeneralLlm(model="openrouter/openai/gpt-4o-search-preview", temperature=0.1, timeout=90),
             "summarizer": GeneralLlm(model="openrouter/openai/gpt-4o-mini", temperature=0.3),
             "parser": GeneralLlm(model="openrouter/openai/gpt-4o-mini", temperature=0.3),

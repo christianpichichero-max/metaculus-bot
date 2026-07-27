@@ -40,9 +40,25 @@ jobs:
       - name: Dead-man switch (stale-forecast alarm)
         env:
           GH_TOKEN: ${{ github.token }}
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
         run: |
           set +e
           [ -s data/forecasts.jsonl ] || { echo "no log yet — skip"; exit 0; }
+          # Drought guard: silence is only alarming if there are questions TO forecast.
+          OPEN=$(python - <<'PY'
+          import os
+          try:
+              from forecasting_tools import MetaculusClient
+              c = MetaculusClient()
+              n = len(c.get_all_open_questions_from_tournament(c.CURRENT_AI_COMPETITION_ID)) \
+                + len(c.get_all_open_questions_from_tournament(c.CURRENT_MINIBENCH_ID))
+              print(n)
+          except Exception:
+              print(-1)  # unknown → don't suppress the alarm
+          PY
+          )
+          echo "open questions right now: $OPEN"
+          if [ "$OPEN" = "0" ]; then echo "question drought — staleness is expected, no alarm"; exit 0; fi
           AGE_H=$(python - <<'PY'
           import json, datetime
           latest = None
