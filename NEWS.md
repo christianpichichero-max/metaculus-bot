@@ -1,15 +1,16 @@
-date: 2026-07-27T14:34:38Z
-resolved: 59 (was 58)
+date: 2026-08-02T13:21:55Z
+resolved: 61 (was 59)
 
 185 log lines | 185 unique questions
 fetching 185 posts...
-first pass: 18 fetch failures — cooling down 30s and retrying those...
+first pass: 17 fetch failures — cooling down 30s and retrying those...
+WARNING: 1 of 185 posts could not be fetched (rate limit/error). Report is INCOMPLETE — resolved.jsonl NOT overwritten; re-run.
 
-RESOLVED binary: 59 | Brier 0.2077 (lower=better, 0.25=coinflip) | LogLoss 0.6342
+RESOLVED binary: 61 | Brier 0.2020 (lower=better, 0.25=coinflip) | LogLoss 0.6199
 
 Reliability (predicted bucket vs actual yes-rate):
    0- 10% | n= 13 | actual 23%
-  10- 20% | n= 14 | actual 21%
+  10- 20% | n= 16 | actual 19%
   20- 30% | n=  7 | actual 14%
   30- 40% | n=  5 | actual 20%
   40- 50% | n=  6 | actual 50%
@@ -19,18 +20,16 @@ Reliability (predicted bucket vs actual yes-rate):
   80- 90% | n=  1 | actual 0%
   90-100% | n=  1 | actual 100%
 
-RESOLVED multiple-choice: 3 | avg ln p(winner) -1.439 | multiclass Brier 0.7905
+RESOLVED multiple-choice: 7 | avg ln p(winner) -1.214 | multiclass Brier 0.6909
 
-RESOLVED numeric/discrete/date: 38 | P10-P90 coverage 89% (target ~80%) | P2.5-P97.5 coverage 95% (target ~95%) | beyond-declared-tails: 0
+RESOLVED numeric/discrete/date: 40 | P10-P90 coverage 88% (target ~80%) | P2.5-P97.5 coverage 95% (target ~95%) | beyond-declared-tails: 0
 
-OFFICIAL scores captured on 100 question(s): SPOT PEER total = -362.01 (prize share ∝ max(0, total)²)
+OFFICIAL scores captured on 108 question(s): SPOT PEER total = -279.85 (prize share ∝ max(0, total)²)
 
-Wrote data/resolved.jsonl (100 resolved) — the ground-truth that gates every change.
-
-SUPERVISOR SHADOW A/B (21 resolved fired-questions):
-  geo-odds (submitted)        Brier: 0.2449
-  ship-policy (high-conf only) Brier: 0.2670  ← geo-odds better/tied
-  diagnostic (always-trust)    Brier: 0.2426
+SUPERVISOR SHADOW A/B (22 resolved fired-questions):
+  geo-odds (submitted)        Brier: 0.2355
+  ship-policy (high-conf only) Brier: 0.2566  ← geo-odds better/tied
+  diagnostic (always-trust)    Brier: 0.2334
   high-confidence overrides (3): geo-odds 0.3862 vs supervisor 0.5409
   Gate: flip use_supervisor=True only if ship-policy wins on ≥30 fired resolutions.
 
