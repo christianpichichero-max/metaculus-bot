@@ -1,5 +1,6 @@
 185 log lines | 185 unique questions
 fetching 185 posts...
+first pass: 18 fetch failures — cooling down 30s and retrying those...
 
 RESOLVED binary: 61 | Brier 0.2020 (lower=better, 0.25=coinflip) | LogLoss 0.6199
 
