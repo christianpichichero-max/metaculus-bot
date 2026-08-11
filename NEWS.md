@@ -1,15 +1,15 @@
-date: 2026-08-05T14:08:59Z
-resolved: 62 (was 61)
+date: 2026-08-11T13:04:28Z
+resolved: 63 (was 62)
 
 185 log lines | 185 unique questions
 fetching 185 posts...
-first pass: 13 fetch failures — cooling down 30s and retrying those...
+first pass: 16 fetch failures — cooling down 30s and retrying those...
 
-RESOLVED binary: 62 | Brier 0.1993 (lower=better, 0.25=coinflip) | LogLoss 0.6133
+RESOLVED binary: 63 | Brier 0.2071 (lower=better, 0.25=coinflip) | LogLoss 0.6317
 
 Reliability (predicted bucket vs actual yes-rate):
    0- 10% | n= 13 | actual 23%
-  10- 20% | n= 17 | actual 18%
+  10- 20% | n= 18 | actual 22%
   20- 30% | n=  7 | actual 14%
   30- 40% | n=  5 | actual 20%
   40- 50% | n=  6 | actual 50%
@@ -19,13 +19,13 @@ Reliability (predicted bucket vs actual yes-rate):
   80- 90% | n=  1 | actual 0%
   90-100% | n=  1 | actual 100%
 
-RESOLVED multiple-choice: 7 | avg ln p(winner) -1.214 | multiclass Brier 0.6909
+RESOLVED multiple-choice: 8 | avg ln p(winner) -1.455 | multiclass Brier 0.7524
 
 RESOLVED numeric/discrete/date: 41 | P10-P90 coverage 88% (target ~80%) | P2.5-P97.5 coverage 95% (target ~95%) | beyond-declared-tails: 0
 
-OFFICIAL scores captured on 110 question(s): SPOT PEER total = -225.00 (prize share ∝ max(0, total)²)
+OFFICIAL scores captured on 112 question(s): SPOT PEER total = -328.12 (prize share ∝ max(0, total)²)
 
-Wrote data/resolved.jsonl (110 resolved) — the ground-truth that gates every change.
+Wrote data/resolved.jsonl (112 resolved) — the ground-truth that gates every change.
 
 SUPERVISOR SHADOW A/B (22 resolved fired-questions):
   geo-odds (submitted)        Brier: 0.2355
@@ -34,7 +34,7 @@ SUPERVISOR SHADOW A/B (22 resolved fired-questions):
   high-confidence overrides (3): geo-odds 0.3862 vs supervisor 0.5409
   Gate: flip use_supervisor=True only if ship-policy wins on ≥30 fired resolutions.
 
-BLF SHADOW A/B (32 resolved):
-  submitted (ensemble geo-odds) Brier: 0.1841
-  belief-loop (shadow)          Brier: 0.2364  ← ensemble better/tied
+BLF SHADOW A/B (33 resolved):
+  submitted (ensemble geo-odds) Brier: 0.1994
+  belief-loop (shadow)          Brier: 0.2454  ← ensemble better/tied
   Gate: promote the BLF to the forecaster seat only if it wins on ≥40 resolutions.
