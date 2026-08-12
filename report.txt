@@ -1,6 +1,6 @@
 185 log lines | 185 unique questions
 fetching 185 posts...
-first pass: 16 fetch failures — cooling down 30s and retrying those...
+first pass: 15 fetch failures — cooling down 30s and retrying those...
 
 RESOLVED binary: 63 | Brier 0.2071 (lower=better, 0.25=coinflip) | LogLoss 0.6317
 
@@ -18,11 +18,11 @@ Reliability (predicted bucket vs actual yes-rate):
 
 RESOLVED multiple-choice: 8 | avg ln p(winner) -1.455 | multiclass Brier 0.7524
 
-RESOLVED numeric/discrete/date: 41 | P10-P90 coverage 88% (target ~80%) | P2.5-P97.5 coverage 95% (target ~95%) | beyond-declared-tails: 0
+RESOLVED numeric/discrete/date: 42 | P10-P90 coverage 86% (target ~80%) | P2.5-P97.5 coverage 95% (target ~95%) | beyond-declared-tails: 0
 
-OFFICIAL scores captured on 112 question(s): SPOT PEER total = -328.12 (prize share ∝ max(0, total)²)
+OFFICIAL scores captured on 113 question(s): SPOT PEER total = -334.57 (prize share ∝ max(0, total)²)
 
-Wrote data/resolved.jsonl (112 resolved) — the ground-truth that gates every change.
+Wrote data/resolved.jsonl (113 resolved) — the ground-truth that gates every change.
 
 SUPERVISOR SHADOW A/B (22 resolved fired-questions):
   geo-odds (submitted)        Brier: 0.2355
