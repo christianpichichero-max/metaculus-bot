@@ -1,16 +1,16 @@
-date: 2026-08-17T12:45:00Z
-resolved: 64 (was 63)
+date: 2026-08-18T12:46:37Z
+resolved: 65 (was 64)
 
 185 log lines | 185 unique questions
 fetching 185 posts...
-first pass: 15 fetch failures — cooling down 30s and retrying those...
+first pass: 14 fetch failures — cooling down 30s and retrying those...
 
-RESOLVED binary: 64 | Brier 0.2039 (lower=better, 0.25=coinflip) | LogLoss 0.6224
+RESOLVED binary: 65 | Brier 0.2084 (lower=better, 0.25=coinflip) | LogLoss 0.6317
 
 Reliability (predicted bucket vs actual yes-rate):
    0- 10% | n= 14 | actual 21%
   10- 20% | n= 18 | actual 22%
-  20- 30% | n=  7 | actual 14%
+  20- 30% | n=  8 | actual 25%
   30- 40% | n=  5 | actual 20%
   40- 50% | n=  6 | actual 50%
   50- 60% | n=  5 | actual 60%
@@ -23,14 +23,14 @@ RESOLVED multiple-choice: 8 | avg ln p(winner) -1.455 | multiclass Brier 0.7524
 
 RESOLVED numeric/discrete/date: 43 | P10-P90 coverage 86% (target ~80%) | P2.5-P97.5 coverage 95% (target ~95%) | beyond-declared-tails: 0
 
-OFFICIAL scores captured on 115 question(s): SPOT PEER total = -294.44 (prize share ∝ max(0, total)²)
+OFFICIAL scores captured on 116 question(s): SPOT PEER total = -395.26 (prize share ∝ max(0, total)²)
 
-Wrote data/resolved.jsonl (115 resolved) — the ground-truth that gates every change.
+Wrote data/resolved.jsonl (116 resolved) — the ground-truth that gates every change.
 
-SUPERVISOR SHADOW A/B (22 resolved fired-questions):
-  geo-odds (submitted)        Brier: 0.2355
-  ship-policy (high-conf only) Brier: 0.2566  ← geo-odds better/tied
-  diagnostic (always-trust)    Brier: 0.2334
+SUPERVISOR SHADOW A/B (23 resolved fired-questions):
+  geo-odds (submitted)        Brier: 0.2470
+  ship-policy (high-conf only) Brier: 0.2671  ← geo-odds better/tied
+  diagnostic (always-trust)    Brier: 0.2452
   high-confidence overrides (3): geo-odds 0.3862 vs supervisor 0.5409
   Gate: flip use_supervisor=True only if ship-policy wins on ≥30 fired resolutions.
 
