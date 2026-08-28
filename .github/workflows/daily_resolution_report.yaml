@@ -41,6 +41,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           set +e
           [ -s data/forecasts.jsonl ] || { echo "no log yet — skip"; exit 0; }
@@ -74,6 +75,17 @@ jobs:
           PY
           )
           echo "hours since last logged forecast: $AGE_H"
+          # CREDITS TRIPWIRE: the Fall lineup runs ~$0.30/question; alarm before the grant
+          # runs dry so we can downshift a seat (or request a top-off) instead of going dark.
+          REMAIN=$(curl -s https://openrouter.ai/api/v1/auth/key -H "Authorization: Bearer $OPENROUTER_API_KEY" | python -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(int(d.get('limit_remaining') or 0))" 2>/dev/null || echo -1)
+          echo "OpenRouter credits remaining: \$$REMAIN"
+          if [ "$REMAIN" != "-1" ] && [ "$REMAIN" -lt 60 ]; then
+            if [ -z "$(gh issue list --state open --search 'CREDITS LOW in:title' --json number -q '.[0]' 2>/dev/null)" ]; then
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "CREDITS LOW: \$$REMAIN OpenRouter credit left" \
+                --body "@christianpichichero-max the grant is under \$60. Options: request a top-off/renewal from Metaculus (LLM credit form), or ask Claude to downshift the ensemble (drop the opus-5 seat)." \
+                || echo "credits issue creation failed (non-fatal)"
+            fi
+          fi
           # FAILURE LEDGER: the bot writes data/failed.jsonl for every question that failed
           # both passes. 683 such entries piled up unread during a month-long outage — so
           # now any burst of recent failures raises its own alarm, with the error text.

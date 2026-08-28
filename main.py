@@ -267,7 +267,7 @@ class EdgeForecastBot(ForecastBot):
     """
 
     _max_concurrent_questions = (
-        1  # Set this to whatever works for your search-provider/ai-model rate limits
+        3  # MiniBench questions open in ~3h windows; 3 concurrent keeps a batch well inside the window
     )
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 2
@@ -333,7 +333,7 @@ class EdgeForecastBot(ForecastBot):
         )
         self._draw_counters: dict[str, itertools.count] = {}
         if self.ensemble_purposes:
-            self.ENSEMBLE_VERSION = "v3-sonnet-o3-weighted-2026-07-27"
+            self.ENSEMBLE_VERSION = "v4-fall-2026"
 
     def get_llm(self, purpose: str = "default", guarantee_type=None):
         """Route 'default' to the current draw's ensemble slot when one is active.
@@ -914,8 +914,9 @@ class EdgeForecastBot(ForecastBot):
     # missing one (prize share ∝ (Σ peer)², a dropped question contributes 0).
     RESEARCH_FALLBACKS = [
         "openrouter/openai/gpt-4o-mini:online",
-        "openrouter/anthropic/claude-sonnet-4.6",
-        "openrouter/openai/o4-mini",
+        "openrouter/anthropic/claude-sonnet-4.6:online",
+        "openrouter/anthropic/claude-sonnet-5",
+        "openrouter/openai/gpt-5.6-sol",
     ]
 
     async def _invoke_research_with_fallbacks(self, researcher, prompt: str) -> str:
@@ -1468,17 +1469,20 @@ def _select_llms():
     # family diversity), sonnet & o3 promoted to 2 each. Re-evaluate at the next
     # N≥30 increment per member; ENSEMBLE_VERSION bumped so the flywheel stratifies.
     if os.getenv("OPENROUTER_API_KEY"):
+        # FALL 2026 LINEUP (v4, 2026-08-28). Ledger verdict on 169 resolved v2 draws:
+        # sonnet-4.6 0.189 / o3 0.188 >> o4-mini 0.221 -> o4-mini retired. Newer models
+        # now on the key: claude-sonnet-5 ($2/$10, cheaper than sonnet-4.6's $3/$15),
+        # claude-opus-5, gpt-5.6-sol. Five seats, two families; the per-model ledger
+        # (data/draws.jsonl x resolutions) re-ranks members at N>=30 each.
+        # o-series/gpt-5.6 REQUIRE temperature=1. ':online' = OpenRouter web-search plugin.
         return {
-            "default": GeneralLlm(model="openrouter/anthropic/claude-sonnet-4.6", temperature=1, timeout=120),
-            "draw_0": GeneralLlm(model="openrouter/anthropic/claude-sonnet-4.6", temperature=1, timeout=120),
-            "draw_1": GeneralLlm(model="openrouter/anthropic/claude-sonnet-4.6", temperature=1, timeout=120),
-            "draw_2": GeneralLlm(model="openrouter/openai/o3", temperature=1, timeout=180),
+            "default": GeneralLlm(model="openrouter/anthropic/claude-sonnet-5", temperature=1, timeout=120),
+            "draw_0": GeneralLlm(model="openrouter/anthropic/claude-sonnet-5", temperature=1, timeout=120),
+            "draw_1": GeneralLlm(model="openrouter/anthropic/claude-sonnet-5", temperature=1, timeout=120),
+            "draw_2": GeneralLlm(model="openrouter/anthropic/claude-opus-5", temperature=1, timeout=150),
             "draw_3": GeneralLlm(model="openrouter/openai/o3", temperature=1, timeout=180),
-            "draw_4": GeneralLlm(model="openrouter/openai/o4-mini", temperature=1, timeout=120),
-            # gpt-4o-search-preview was REMOVED from OpenRouter (~late Jul 2026) — that single
-            # deprecation zeroed every forecast for a month. ":online" = OpenRouter's web-search
-            # plugin on a normal model; verified to return live, dated headlines.
-            "researcher": GeneralLlm(model="openrouter/anthropic/claude-sonnet-4.6:online", temperature=0.1, timeout=120),
+            "draw_4": GeneralLlm(model="openrouter/openai/gpt-5.6-sol", temperature=1, timeout=150),
+            "researcher": GeneralLlm(model="openrouter/anthropic/claude-sonnet-5:online", temperature=0.1, timeout=120),
             "summarizer": GeneralLlm(model="openrouter/openai/gpt-4o-mini", temperature=0.3),
             "parser": GeneralLlm(model="openrouter/openai/gpt-4o-mini", temperature=0.3),
         }
@@ -1574,10 +1578,10 @@ if __name__ == "__main__":
     # Supervisor runs in SHADOW: it investigates disagreements and logs its verdict,
     # but geo-odds is what gets submitted. resolve.py compares the two on our own
     # resolved questions; the supervisor goes live only if it wins that comparison.
-    bot.supervisor_shadow = True
+    bot.supervisor_shadow = False  # RETIRED 2026-08-28: lost its audition (ship-policy Brier 0.267 vs geo-odds 0.245 at 23 fired resolutions)
     # Belief-state loop auditions the same way: shadow forecast on every binary,
     # logged to data/blf.jsonl, never submitted until it wins on resolutions.
-    bot.use_blf_shadow = True
+    bot.use_blf_shadow = False  # RETIRED 2026-08-28: lost its audition (BLF 0.236 vs ensemble 0.184 at 34 resolutions); ~5 calls/binary saved
 
     # Per-mode tournament URL shown in the summary banner footer. These
     # piggyback on the forecasting_tools SDK constants and need updating
