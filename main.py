@@ -85,6 +85,29 @@ def _install_metaculus_api_compat() -> None:
 # (compat patch NOT installed: tested — the singular forecast_type param still works; not the cause)
 
 
+ECONOMY_CREDIT_THRESHOLD = 120.0  # USD remaining on the OpenRouter grant
+
+
+def _economy_mode() -> bool:
+    """True when the OpenRouter grant is below the threshold (or ECONOMY_MODE=1).
+    Read-only, cached per process; any failure -> False (never blocks a run)."""
+    if os.getenv("ECONOMY_MODE", "").strip() in ("1", "true", "yes"):
+        return True
+    if os.getenv("ECONOMY_MODE", "").strip() in ("0", "false", "no"):
+        return False
+    try:
+        import requests as _rq
+        r = _rq.get("https://openrouter.ai/api/v1/auth/key",
+                    headers={"Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY', '')}"}, timeout=15)
+        remaining = float((r.json().get("data") or {}).get("limit_remaining") or 0)
+        if remaining < ECONOMY_CREDIT_THRESHOLD:
+            logger.warning(f"OpenRouter credits ${remaining:.0f} < ${ECONOMY_CREDIT_THRESHOLD:.0f} -> ECONOMY lineup")
+            return True
+    except Exception as exc:
+        logger.warning(f"credit check failed ({exc}); assuming full lineup")
+    return False
+
+
 def _discover_bot_tournaments(client) -> list:
     """Every ONGOING FutureEval/AIB bot tournament (so a new season — e.g. Fall 2026 —
     is covered from day one without waiting for an SDK release) plus the MiniBench
@@ -333,7 +356,7 @@ class EdgeForecastBot(ForecastBot):
         )
         self._draw_counters: dict[str, itertools.count] = {}
         if self.ensemble_purposes:
-            self.ENSEMBLE_VERSION = "v4-fall-2026"
+            self.ENSEMBLE_VERSION = "v4-fall-2026-economy" if _economy_mode() else "v4-fall-2026"
 
     def get_llm(self, purpose: str = "default", guarantee_type=None):
         """Route 'default' to the current draw's ensemble slot when one is active.
@@ -1468,6 +1491,21 @@ def _select_llms():
     # beat o4-mini 0.2114 (n=64) → o4-mini demoted from 2 seats to 1 (kept for
     # family diversity), sonnet & o3 promoted to 2 each. Re-evaluate at the next
     # N≥30 increment per member; ENSEMBLE_VERSION bumped so the flywheel stratifies.
+    if os.getenv("OPENROUTER_API_KEY") and _economy_mode():
+        # ECONOMY LINEUP (~half cost): coverage beats a marginal seat — prize share is
+        # (Σ peer)², so a question we can't afford to forecast contributes 0. Auto-selected
+        # when the grant runs low (or ECONOMY_MODE=1). Still two families, still ledgered.
+        return {
+            "default": GeneralLlm(model="openrouter/anthropic/claude-sonnet-5", temperature=1, timeout=120),
+            "draw_0": GeneralLlm(model="openrouter/anthropic/claude-sonnet-5", temperature=1, timeout=120),
+            "draw_1": GeneralLlm(model="openrouter/anthropic/claude-sonnet-5", temperature=1, timeout=120),
+            "draw_2": GeneralLlm(model="openrouter/anthropic/claude-sonnet-5", temperature=1, timeout=120),
+            "draw_3": GeneralLlm(model="openrouter/openai/gpt-5.6-sol", temperature=1, timeout=150),
+            "draw_4": GeneralLlm(model="openrouter/openai/gpt-5.6-sol", temperature=1, timeout=150),
+            "researcher": GeneralLlm(model="openrouter/openai/gpt-4o-mini:online", temperature=0.1, timeout=120),
+            "summarizer": GeneralLlm(model="openrouter/openai/gpt-4o-mini", temperature=0.3),
+            "parser": GeneralLlm(model="openrouter/openai/gpt-4o-mini", temperature=0.3),
+        }
     if os.getenv("OPENROUTER_API_KEY"):
         # FALL 2026 LINEUP (v4, 2026-08-28). Ledger verdict on 169 resolved v2 draws:
         # sonnet-4.6 0.189 / o3 0.188 >> o4-mini 0.221 -> o4-mini retired. Newer models
