@@ -57,8 +57,7 @@ jobs:
               print(-1)  # unknown → don't suppress the alarm
           PY
           )
-          echo "open questions right now: $OPEN"
-          if [ "$OPEN" = "0" ]; then echo "question drought — staleness is expected, no alarm"; exit 0; fi
+          echo "open questions right now (SDK fetch): $OPEN"
           AGE_H=$(python - <<'PY'
           import json, datetime
           latest = None
@@ -75,6 +74,54 @@ jobs:
           PY
           )
           echo "hours since last logged forecast: $AGE_H"
+          # FAILURE LEDGER: the bot writes data/failed.jsonl for every question that failed
+          # both passes. 683 such entries piled up unread during a month-long outage — so
+          # now any burst of recent failures raises its own alarm, with the error text.
+          FAILS48=$(python - <<'PY3'
+          import json, datetime, os
+          cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=48)).isoformat()
+          n = 0; last = ""
+          if os.path.exists("data/failed.jsonl"):
+              for line in open("data/failed.jsonl"):
+                  try:
+                      r = json.loads(line)
+                      if (r.get("at") or "") >= cutoff:
+                          n += 1; last = (r.get("error") or "")[:400]
+                  except Exception: pass
+          print(n); print(last)
+          PY3
+          )
+          FAILN=$(echo "$FAILS48" | head -1); FAILMSG=$(echo "$FAILS48" | tail -n +2)
+          echo "question failures in last 48h: $FAILN"
+          if [ "${FAILN:-0}" -ge 3 ]; then
+            if [ -z "$(gh issue list --state open --search 'FORECAST FAILURES in:title' --json number -q '.[0]' 2>/dev/null)" ]; then
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "FORECAST FAILURES: $FAILN question(s) failed in the last 48h" \
+                --body "@christianpichichero-max questions are being fetched but forecasts are FAILING. Last error: \`$FAILMSG\`" \
+                || echo "failure issue creation failed (non-fatal)"
+            else
+              echo "failure issue already open — not duplicating"
+            fi
+          fi
+          # Independent signal (raw API, NO type filter — the SDK filter is exactly what
+          # went blind for a month): were any bot-tournament posts published in the last 48h?
+          NEWPOSTS=$(python - <<'PY2'
+          import os, requests, datetime
+          tok = os.getenv("METACULUS_TOKEN", "")
+          cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%S")
+          total = 0
+          for t in ("minibench", "33022"):
+              try:
+                  r = requests.get("https://www.metaculus.com/api/posts/", headers={"Authorization": f"Token {tok}"},
+                                   params={"tournaments": t, "limit": 100, "published_at__gt": cutoff}, timeout=30)
+                  total += len((r.json() or {}).get("results") or [])
+              except Exception:
+                  total = -1; break
+          print(total)
+          PY2
+          )
+          echo "bot-tournament posts published in last 48h (raw API): $NEWPOSTS"
+          if [ "$OPEN" = "0" ] && [ "$NEWPOSTS" = "0" ]; then echo "genuine question drought — no alarm"; exit 0; fi
+          if [ "$NEWPOSTS" != "0" ] && [ "$AGE_H" -ge 30 ]; then echo "::warning::questions were published but nothing was forecast — fetch may be blind"; fi
           if [ "$AGE_H" -ge 30 ]; then
             if [ -z "$(gh issue list --state open --search 'DEAD-MAN in:title' --json number -q '.[0]' 2>/dev/null)" ]; then
               gh issue create --repo "$GITHUB_REPOSITORY" \

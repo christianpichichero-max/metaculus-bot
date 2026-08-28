@@ -3,7 +3,7 @@ name: Forecast on new AI tournament questions
 on:
   workflow_dispatch:
   schedule:
-    - cron: "7,27,47 * * * *" # every 20 min, offset off the hour. skip_previously_forecasted_questions=True handles dedupe.
+    - cron: "3,13,23,33,43,53 * * * *" # every 10 min — MiniBench questions now open for ~3h windows; dedupe via skip_previously_forecasted_questions=True.
 
 # Needs write access to push the accumulating forecast log to the 'data' branch.
 permissions:

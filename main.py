@@ -59,6 +59,61 @@ from forecasting_tools import (
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
+
+# ── Metaculus API compatibility (2026-07/08) ─────────────────────────────────
+def _install_metaculus_api_compat() -> None:
+    """Metaculus renamed the posts filter `forecast_type` -> `forecast_types`.
+    forecasting-tools 0.2.92 (latest) still sends the singular, which now returns
+    ZERO open questions — this silently blinded the bot from ~Jul 24 to Aug 28 while
+    every run reported success. Rewrite the param at the SDK's URL-builder hook."""
+    try:
+        from forecasting_tools.helpers.metaculus_client import MetaculusClient as _MC
+        _orig = _MC._create_url_params_for_search
+
+        def _patched(self, api_filter, offset=0):
+            params = _orig(self, api_filter, offset)
+            if "forecast_type" in params and "forecast_types" not in params:
+                params["forecast_types"] = params.pop("forecast_type")
+            return params
+
+        _MC._create_url_params_for_search = _patched
+        logger.info("Metaculus API compat: forecast_type -> forecast_types patch installed")
+    except Exception as exc:
+        logger.warning(f"Metaculus API compat patch NOT installed: {exc}")
+
+
+# (compat patch NOT installed: tested — the singular forecast_type param still works; not the cause)
+
+
+def _discover_bot_tournaments(client) -> list:
+    """Every ONGOING FutureEval/AIB bot tournament (so a new season — e.g. Fall 2026 —
+    is covered from day one without waiting for an SDK release) plus the MiniBench
+    alias. Falls back to the SDK constants if discovery fails."""
+    import requests as _rq
+    ids: list = []
+    try:
+        r = _rq.get(
+            "https://www.metaculus.com/api/projects/tournaments/?limit=500",
+            headers={"Authorization": f"Token {os.getenv('METACULUS_TOKEN', '')}"},
+            timeout=30,
+        )
+        items = r.json()
+        items = items.get("results", items) if isinstance(items, dict) else items
+        for t in items or []:
+            text = f"{t.get('slug', '')} {t.get('name', '')}".lower()
+            if not t.get("is_ongoing"):
+                continue
+            if ("futureeval" in text or "aib" in text or "ai forecasting benchmark" in text) \
+                    and "cup" not in text and t.get("id") is not None:
+                ids.append(t["id"])
+    except Exception as exc:
+        logger.warning(f"tournament discovery failed ({exc}); using SDK constants")
+    if client.CURRENT_AI_COMPETITION_ID not in ids:
+        ids.append(client.CURRENT_AI_COMPETITION_ID)
+    ids.append(client.CURRENT_MINIBENCH_ID)
+    logger.info(f"forecasting on tournaments: {ids}")
+    return ids
+
 # ── Quant data-source helpers (requests-only; no new deps) ───────────────────
 _QUANT_TICKER_RE = re.compile(r"\((?:NYSE|NASDAQ|Nasdaq|AMEX|OTC)\s*:\s*([A-Z][A-Z.\-]{0,5})\)")
 _QUANT_YAHOO = {
@@ -741,7 +796,7 @@ class EdgeForecastBot(ForecastBot):
             )
 
             if isinstance(researcher, GeneralLlm):
-                research = await researcher.invoke(prompt)
+                research = await self._invoke_research_with_fallbacks(researcher, prompt)
             elif (
                 researcher == "asknews/news-summaries"
                 or researcher == "asknews/deep-research/low-depth"
@@ -853,6 +908,30 @@ class EdgeForecastBot(ForecastBot):
         except Exception as exc:
             logger.warning(f"quant-data research failed ({exc}); continuing without it")
             return research
+
+    # Ordered fallbacks if the primary researcher fails (model removed, provider outage).
+    # Last resort is LLM-only research on a plain model: a degraded forecast beats a
+    # missing one (prize share ∝ (Σ peer)², a dropped question contributes 0).
+    RESEARCH_FALLBACKS = [
+        "openrouter/openai/gpt-4o-mini:online",
+        "openrouter/anthropic/claude-sonnet-4.6",
+        "openrouter/openai/o4-mini",
+    ]
+
+    async def _invoke_research_with_fallbacks(self, researcher, prompt: str) -> str:
+        try:
+            return await researcher.invoke(prompt)
+        except Exception as exc:
+            logger.warning(f"primary researcher {getattr(researcher, 'model', '?')} failed: {str(exc)[:160]}")
+        for model in self.RESEARCH_FALLBACKS:
+            try:
+                out = await GeneralLlm(model=model, temperature=0.1, timeout=120).invoke(prompt)
+                logger.warning(f"research served by FALLBACK {model}")
+                return out
+            except Exception as exc:
+                logger.warning(f"fallback researcher {model} failed: {str(exc)[:120]}")
+        logger.error("ALL researchers failed — forecasting with no research (coverage > silence)")
+        return "(No live research available for this run — reason from background knowledge and base rates.)"
 
     async def _add_base_rate_research(
         self, question: MetaculusQuestion, situation_research: str
@@ -1396,7 +1475,10 @@ def _select_llms():
             "draw_2": GeneralLlm(model="openrouter/openai/o3", temperature=1, timeout=180),
             "draw_3": GeneralLlm(model="openrouter/openai/o3", temperature=1, timeout=180),
             "draw_4": GeneralLlm(model="openrouter/openai/o4-mini", temperature=1, timeout=120),
-            "researcher": GeneralLlm(model="openrouter/openai/gpt-4o-search-preview", temperature=0.1, timeout=90),
+            # gpt-4o-search-preview was REMOVED from OpenRouter (~late Jul 2026) — that single
+            # deprecation zeroed every forecast for a month. ":online" = OpenRouter's web-search
+            # plugin on a normal model; verified to return live, dated headlines.
+            "researcher": GeneralLlm(model="openrouter/anthropic/claude-sonnet-4.6:online", temperature=0.1, timeout=120),
             "summarizer": GeneralLlm(model="openrouter/openai/gpt-4o-mini", temperature=0.3),
             "parser": GeneralLlm(model="openrouter/openai/gpt-4o-mini", temperature=0.3),
         }
@@ -1527,11 +1609,11 @@ if __name__ == "__main__":
         return reports
 
     if run_mode == "tournament":
-        forecast_reports = _run_and_log(
-            _forecast_with_coverage_retry(bot, client.CURRENT_AI_COMPETITION_ID), "seasonal"
-        ) + _run_and_log(
-            _forecast_with_coverage_retry(bot, client.CURRENT_MINIBENCH_ID), "minibench"
-        )
+        forecast_reports = []
+        for tid in _discover_bot_tournaments(client):
+            forecast_reports += _run_and_log(
+                _forecast_with_coverage_retry(bot, tid), f"tournament:{tid}"
+            )
     elif run_mode == "minibench":
         # MiniBench only — the bi-weekly ~$1k / ~60-question rounds. Cheapest lane
         # and fastest scored feedback (every ~2 weeks vs a 4-month season).
