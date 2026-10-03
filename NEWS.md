@@ -1,31 +1,31 @@
-date: 2026-09-21T18:00:43Z
-resolved: 128 (was 127)
+date: 2026-10-03T15:48:01Z
+resolved: 145 (was 128)
 
-247 log lines | 247 unique questions
-fetching 247 posts...
-first pass: 20 fetch failures — cooling down 30s and retrying those...
+276 log lines | 276 unique questions
+fetching 276 posts...
+first pass: 5 fetch failures — cooling down 30s and retrying those...
 
-RESOLVED binary: 128 | Brier 0.1910 (lower=better, 0.25=coinflip) | LogLoss 0.5729
+RESOLVED binary: 145 | Brier 0.1878 (lower=better, 0.25=coinflip) | LogLoss 0.5661
 
 Reliability (predicted bucket vs actual yes-rate):
    0- 10% | n= 24 | actual 17%
-  10- 20% | n= 31 | actual 13%
-  20- 30% | n= 18 | actual 28%
+  10- 20% | n= 38 | actual 16%
+  20- 30% | n= 23 | actual 22%
   30- 40% | n= 12 | actual 33%
-  40- 50% | n= 12 | actual 50%
+  40- 50% | n= 14 | actual 43%
   50- 60% | n= 10 | actual 70%
-  60- 70% | n=  7 | actual 43%
+  60- 70% | n=  8 | actual 38%
   70- 80% | n= 11 | actual 55%
-  80- 90% | n=  1 | actual 0%
-  90-100% | n=  2 | actual 100%
+  80- 90% | n=  2 | actual 50%
+  90-100% | n=  3 | actual 100%
 
-RESOLVED multiple-choice: 20 | avg ln p(winner) -1.437 | multiclass Brier 0.6880
+RESOLVED multiple-choice: 22 | avg ln p(winner) -1.458 | multiclass Brier 0.7141
 
-RESOLVED numeric/discrete/date: 79 | P10-P90 coverage 85% (target ~80%) | P2.5-P97.5 coverage 94% (target ~95%) | beyond-declared-tails: 3
+RESOLVED numeric/discrete/date: 92 | P10-P90 coverage 83% (target ~80%) | P2.5-P97.5 coverage 95% (target ~95%) | beyond-declared-tails: 2
 
-OFFICIAL scores captured on 227 question(s): SPOT PEER total = -512.04 (prize share ∝ max(0, total)²)
+OFFICIAL scores captured on 259 question(s): SPOT PEER total = -318.38 (prize share ∝ max(0, total)²)
 
-Wrote data/resolved.jsonl (227 resolved) — the ground-truth that gates every change.
+Wrote data/resolved.jsonl (259 resolved) — the ground-truth that gates every change.
 
 SUPERVISOR SHADOW A/B (46 resolved fired-questions):
   geo-odds (submitted)        Brier: 0.2266
