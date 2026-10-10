@@ -1,13 +1,13 @@
-305 log lines | 305 unique questions
-fetching 305 posts...
-first pass: 24 fetch failures — cooling down 30s and retrying those...
-WARNING: 1 of 305 posts could not be fetched (rate limit/error). Report is INCOMPLETE — resolved.jsonl NOT overwritten; re-run.
+308 log lines | 308 unique questions
+fetching 308 posts...
+first pass: 26 fetch failures — cooling down 30s and retrying those...
+WARNING: 1 of 308 posts could not be fetched (rate limit/error). Report is INCOMPLETE — resolved.jsonl NOT overwritten; re-run.
 
-RESOLVED binary: 147 | Brier 0.1883 (lower=better, 0.25=coinflip) | LogLoss 0.5663
+RESOLVED binary: 146 | Brier 0.1893 (lower=better, 0.25=coinflip) | LogLoss 0.5687
 
 Reliability (predicted bucket vs actual yes-rate):
    0- 10% | n= 24 | actual 17%
-  10- 20% | n= 39 | actual 15%
+  10- 20% | n= 38 | actual 16%
   20- 30% | n= 23 | actual 22%
   30- 40% | n= 13 | actual 38%
   40- 50% | n= 14 | actual 43%
@@ -19,9 +19,9 @@ Reliability (predicted bucket vs actual yes-rate):
 
 RESOLVED multiple-choice: 22 | avg ln p(winner) -1.458 | multiclass Brier 0.7141
 
-RESOLVED numeric/discrete/date: 96 | P10-P90 coverage 83% (target ~80%) | P2.5-P97.5 coverage 94% (target ~95%) | beyond-declared-tails: 2
+RESOLVED numeric/discrete/date: 97 | P10-P90 coverage 82% (target ~80%) | P2.5-P97.5 coverage 94% (target ~95%) | beyond-declared-tails: 2
 
-OFFICIAL scores captured on 265 question(s): SPOT PEER total = -305.71 (prize share ∝ max(0, total)²)
+OFFICIAL scores captured on 265 question(s): SPOT PEER total = -337.64 (prize share ∝ max(0, total)²)
 
 SUPERVISOR SHADOW A/B (46 resolved fired-questions):
   geo-odds (submitted)        Brier: 0.2266
