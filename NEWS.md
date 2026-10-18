@@ -1,15 +1,15 @@
-date: 2026-10-17T15:07:08Z
-resolved: 160 (was 147)
+date: 2026-10-18T15:34:13Z
+resolved: 161 (was 160)
 
-325 log lines | 325 unique questions
-fetching 325 posts...
-first pass: 21 fetch failures — cooling down 30s and retrying those...
+328 log lines | 328 unique questions
+fetching 328 posts...
+first pass: 24 fetch failures — cooling down 30s and retrying those...
 
-RESOLVED binary: 160 | Brier 0.1845 (lower=better, 0.25=coinflip) | LogLoss 0.5577
+RESOLVED binary: 161 | Brier 0.1835 (lower=better, 0.25=coinflip) | LogLoss 0.5550
 
 Reliability (predicted bucket vs actual yes-rate):
    0- 10% | n= 24 | actual 17%
-  10- 20% | n= 44 | actual 14%
+  10- 20% | n= 45 | actual 13%
   20- 30% | n= 24 | actual 21%
   30- 40% | n= 13 | actual 38%
   40- 50% | n= 14 | actual 43%
@@ -19,13 +19,13 @@ Reliability (predicted bucket vs actual yes-rate):
   80- 90% | n=  3 | actual 33%
   90-100% | n=  3 | actual 100%
 
-RESOLVED multiple-choice: 23 | avg ln p(winner) -1.433 | multiclass Brier 0.7101
+RESOLVED multiple-choice: 24 | avg ln p(winner) -1.434 | multiclass Brier 0.7092
 
-RESOLVED numeric/discrete/date: 103 | P10-P90 coverage 83% (target ~80%) | P2.5-P97.5 coverage 94% (target ~95%) | beyond-declared-tails: 2
+RESOLVED numeric/discrete/date: 104 | P10-P90 coverage 83% (target ~80%) | P2.5-P97.5 coverage 94% (target ~95%) | beyond-declared-tails: 2
 
-OFFICIAL scores captured on 286 question(s): SPOT PEER total = -428.35 (prize share ∝ max(0, total)²)
+OFFICIAL scores captured on 289 question(s): SPOT PEER total = -399.80 (prize share ∝ max(0, total)²)
 
-Wrote data/resolved.jsonl (286 resolved) — the ground-truth that gates every change.
+Wrote data/resolved.jsonl (289 resolved) — the ground-truth that gates every change.
 
 SUPERVISOR SHADOW A/B (46 resolved fired-questions):
   geo-odds (submitted)        Brier: 0.2266
